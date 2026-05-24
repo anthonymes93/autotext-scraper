@@ -3,7 +3,7 @@ import cron from "node-cron";
 import { runScraper, ScraperBlockedError } from "./scraper/kijiji.js";
 import { processListing } from "./services/leadDecision.js";
 import { createOpportunity, upsertContact, updateListingStatus } from "./services/firestore.js";
-import { addLeadToNotion } from "./services/notion.js";
+import { addLeadToNotion, phoneExistsInNotion } from "./services/notion.js";
 import { detectWebsite } from "./parsers/website.js";
 import { logger } from "./utils/logger.js";
 import { env } from "./config/env.js";
@@ -165,6 +165,20 @@ async function runPipeline(): Promise<void> {
 
     if (result.status === "created") {
       stats.created++;
+
+      // Defensive guard: re-check Notion immediately before writing, in case the
+      // pipeline check was skipped due to a transient error or config change.
+      if (env.NOTION_ENABLED && !env.TEST_MODE) {
+        const notionDupe = await phoneExistsInNotion(result.phone);
+        if (notionDupe) {
+          logger.warn("Blocked opportunity creation: duplicate_notion", {
+            phone: result.phone,
+            listingUrl: result.url,
+          });
+          stats.skipped++;
+          continue;
+        }
+      }
 
       if (env.TEST_MODE && !env.TEST_WRITE_TO_FIRESTORE) {
         logger.info("[TEST] Skipping Firestore/Notion writes (TEST_WRITE_TO_FIRESTORE not set)", {

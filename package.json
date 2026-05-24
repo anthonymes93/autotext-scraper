@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test:notion-phone": "tsx src/scripts/testNotionPhone.ts"
+    "test:notion-phone": "tsx src/scripts/testNotionPhone.ts",
+    "test:notion-dedupe": "tsx src/scripts/testNotionDedupe.ts"
   },
   "engines": {
     "node": ">=20.0.0"

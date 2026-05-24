@@ -130,7 +130,8 @@ export async function addLeadToNotion(lead: QualifiedLead): Promise<void> {
           title: [{ text: { content: lead.title } }],
         },
         [env.NOTION_PHONE_PROPERTY]: {
-          phone_number: lead.phone.e164,
+          // Store as 10-digit to match existing CRM data and ensure future dedup queries hit.
+          phone_number: to10Digits(lead.phone.e164) ?? lead.phone.e164,
         },
         Location: {
           rich_text: [{ text: { content: lead.location } }],
