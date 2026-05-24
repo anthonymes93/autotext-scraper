@@ -23,6 +23,10 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === "true"),
+  NOTION_WRITE_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"),
   NOTION_PHONE_PROPERTY: z.string().optional().default("Phone"),
 
   // Scrape timing

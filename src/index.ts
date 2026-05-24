@@ -177,10 +177,11 @@ async function runPipeline(): Promise<void> {
           upsertContact(result.lead),
         ];
 
-        if (env.NOTION_ENABLED) {
+        if (env.NOTION_ENABLED && env.NOTION_WRITE_ENABLED) {
           writes.push(addLeadToNotion(result.lead));
         } else {
-          logger.info("Notion disabled, skipping addLeadToNotion", { url: result.url });
+          const reason = !env.NOTION_ENABLED ? "Notion disabled" : "Notion write disabled";
+          logger.info(`${reason}, skipping addLeadToNotion`, { url: result.url });
         }
 
         await Promise.all(writes);

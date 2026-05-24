@@ -41,7 +41,8 @@ Page 1 always uses the base URL without a `/page-1/` segment. Pagination stops e
 | `OPENAI_API_KEY` | OpenAI API key for validation |
 | `NOTION_API_KEY` | Notion integration token (only required when `NOTION_ENABLED=true`). Accepts `secret_...` (classic) or `ntn_...` (modern) format. |
 | `NOTION_DATABASE_ID` | Notion database ID for leads (only required when `NOTION_ENABLED=true`) |
-| `NOTION_ENABLED` | `true` to enable Notion duplicate checks and lead writes (default: `false`) |
+| `NOTION_ENABLED` | `true` to enable Notion duplicate checks (default: `false`) |
+| `NOTION_WRITE_ENABLED` | `true` to also write new leads into Notion (default: `false`). Requires `NOTION_ENABLED=true`. Duplicate checking works independently of this flag. |
 | `NOTION_PHONE_PROPERTY` | Notion database property name for phone numbers (default: `Phone`). Must be a **Phone Number** type property. Phone values must be stored in E.164 format (`+1XXXXXXXXXX`) for duplicate detection to work reliably. |
 | `MAX_PAGES_PER_RUN` | Pages to scrape per run (default: `15`) |
 | `SCRAPE_WINDOW_MINUTES` | Minutes to spread page fetches across (default: `120`) |
