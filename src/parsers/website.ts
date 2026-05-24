@@ -1,5 +1,10 @@
 import { dedupeArray } from "../utils/normalize.js";
 
+export interface WebsiteDetection {
+  url: string;
+  foundIn: "sidebar" | "description";
+}
+
 const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+/gi;
 
 const IGNORED_DOMAINS = [
@@ -25,21 +30,23 @@ function isIgnoredDomain(url: string): boolean {
 export function extractWebsitesFromText(text: string): string[] {
   const matches = text.matchAll(URL_PATTERN);
   const urls: string[] = [];
-
   for (const match of matches) {
     const url = match[0].replace(/[.,;!?]+$/, "");
-    if (!isIgnoredDomain(url)) {
-      urls.push(url);
-    }
+    if (!isIgnoredDomain(url)) urls.push(url);
   }
-
   return dedupeArray(urls);
 }
 
-export function hasWebsite(
+export function detectWebsite(
   sidebarWebsite: string | undefined,
   descriptionWebsites: string[]
-): boolean {
-  if (sidebarWebsite && !isIgnoredDomain(sidebarWebsite)) return true;
-  return descriptionWebsites.length > 0;
+): WebsiteDetection | null {
+  if (sidebarWebsite && !isIgnoredDomain(sidebarWebsite)) {
+    return { url: sidebarWebsite, foundIn: "sidebar" };
+  }
+  const first = descriptionWebsites.find((u) => !isIgnoredDomain(u));
+  if (first) {
+    return { url: first, foundIn: "description" };
+  }
+  return null;
 }

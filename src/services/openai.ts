@@ -13,36 +13,37 @@ function getClient(): OpenAI {
 
 interface ValidateLeadInput {
   phone: string;
-  sellerName: string | undefined;
+  sellerName: string;
   title: string;
   description: string;
 }
 
 const SYSTEM_PROMPT = `You are a lead qualification assistant for a Canadian home services outreach platform.
-Given a Kijiji listing's details, determine:
-1. Whether the phone number appears to be a real Canadian mobile number (not a Google Voice, VoIP, or clearly fake number)
-2. Whether the seller name looks like a real first name (confidence: high/low/none)
-3. Whether the seller name looks like a real company name (confidence: high/low/none)
-4. If the lead should be skipped entirely and why
+You are called ONLY for listings where the seller name is ambiguous — it could not be classified as a person's first name or a company name by heuristics alone.
 
-Respond in JSON only. No markdown. No explanation outside the JSON.`;
+Given the listing details, determine:
+1. Whether the phone number appears to be a real Canadian mobile or landline (not VoIP / clearly fake)
+2. Whether the seller name most likely represents a real first name (confidence: high/low/none)
+3. Whether the seller name most likely represents a company name (confidence: high/low/none)
+4. Whether the lead should be skipped entirely, and why (omit if no skip reason)
 
-interface OpenAIValidationResponse {
-  phoneValid: boolean;
-  firstNameConfidence: "high" | "low" | "none";
-  companyConfidence: "high" | "low" | "none";
-  skipReason?: string;
-}
+Rules:
+- If the name looks like a full name (e.g. "Joe Smith"), firstNameConfidence should be "high"
+- If it looks like a business but is 3+ words, companyConfidence should be "low"
+- Only set skipReason if the lead is clearly spam, fake, or unrelated to home services
+
+Respond in valid JSON only. No markdown. No explanation outside the JSON.
+Schema: { "phoneValid": boolean, "firstNameConfidence": "high"|"low"|"none", "companyConfidence": "high"|"low"|"none", "skipReason": string | undefined }`;
 
 export async function validateLead(input: ValidateLeadInput): Promise<ValidationResult> {
   const client = getClient();
 
-  const userMessage = `
-Phone: ${input.phone}
-Seller Name: ${input.sellerName ?? "unknown"}
-Title: ${input.title}
-Description (first 500 chars): ${input.description.slice(0, 500)}
-`.trim();
+  const userMessage = [
+    `Phone: ${input.phone}`,
+    `Seller Name: ${input.sellerName}`,
+    `Title: ${input.title}`,
+    `Description (first 400 chars): ${input.description.slice(0, 400)}`,
+  ].join("\n");
 
   try {
     const response = await client.chat.completions.create({
@@ -58,7 +59,7 @@ Description (first 500 chars): ${input.description.slice(0, 500)}
     const content = response.choices[0]?.message?.content;
     if (!content) throw new Error("Empty OpenAI response");
 
-    const parsed = JSON.parse(content) as OpenAIValidationResponse;
+    const parsed = JSON.parse(content) as Partial<ValidationResult>;
 
     return {
       phoneValid: parsed.phoneValid ?? true,
@@ -67,52 +68,8 @@ Description (first 500 chars): ${input.description.slice(0, 500)}
       skipReason: parsed.skipReason,
     };
   } catch (err) {
-    logger.error("OpenAI validation failed, defaulting to valid", { err: String(err) });
-    return {
-      phoneValid: true,
-      firstNameConfidence: "low",
-      companyConfidence: "low",
-    };
+    logger.error("OpenAI validation failed, proceeding without AI result", { err: String(err) });
+    // Fail open — don't skip a lead just because AI was unavailable
+    return { phoneValid: true, firstNameConfidence: "none", companyConfidence: "none" };
   }
-}
-
-export async function generateOutreachMessage(params: {
-  outreachName: string | null;
-  title: string;
-  location: string;
-}): Promise<string> {
-  const client = getClient();
-
-  const greeting = params.outreachName ? `Hi ${params.outreachName}` : "Hi there";
-
-  const prompt = `Generate a short, natural SMS outreach message (under 160 characters) for a Canadian home services lead.
-Greeting: "${greeting}"
-Service type: "${params.title}"
-Location: "${params.location}"
-
-The message should feel personal, not spammy, and end with a soft call to action.
-Return just the message text. No quotes. No explanation.`;
-
-  try {
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.7,
-      max_tokens: 80,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    return response.choices[0]?.message?.content?.trim() ?? buildFallbackMessage(params);
-  } catch (err) {
-    logger.error("OpenAI outreach generation failed, using fallback", { err: String(err) });
-    return buildFallbackMessage(params);
-  }
-}
-
-function buildFallbackMessage(params: {
-  outreachName: string | null;
-  title: string;
-  location: string;
-}): string {
-  const greeting = params.outreachName ? `Hi ${params.outreachName}` : "Hi there";
-  return `${greeting}, I came across your listing on Kijiji and wanted to reach out. Would you be open to a quick chat?`;
 }

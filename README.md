@@ -26,9 +26,10 @@ Page 1 always uses the base URL without a `/page-1/` segment. Pagination stops e
 
 1. Copy `.env.example` to `.env` and fill in your credentials
 2. Install dependencies: `npm install`
-3. Run in dev mode: `npm run dev`
-4. Build for production: `npm run build`
-5. Start production build: `npm start`
+3. Install Playwright browser binaries: `npx playwright install chromium`
+4. Run in dev mode: `npm run dev`
+5. Build for production: `npm run build`
+6. Start production build: `npm start`
 
 ## Environment Variables
 
@@ -38,10 +39,18 @@ Page 1 always uses the base URL without a `/page-1/` segment. Pagination stops e
 | `FIREBASE_CLIENT_EMAIL` | Firebase service account email |
 | `FIREBASE_PRIVATE_KEY` | Firebase service account private key |
 | `OPENAI_API_KEY` | OpenAI API key for validation |
-| `NOTION_API_KEY` | Notion integration token |
-| `NOTION_DATABASE_ID` | Notion database ID for leads |
+| `NOTION_API_KEY` | Notion integration token (only required when `NOTION_ENABLED=true`). Accepts `secret_...` (classic) or `ntn_...` (modern) format. |
+| `NOTION_DATABASE_ID` | Notion database ID for leads (only required when `NOTION_ENABLED=true`) |
+| `NOTION_ENABLED` | `true` to enable Notion duplicate checks and lead writes (default: `false`) |
+| `NOTION_PHONE_PROPERTY` | Notion database property name for phone numbers (default: `Phone`). Must be a **Phone Number** type property. Phone values must be stored in E.164 format (`+1XXXXXXXXXX`) for duplicate detection to work reliably. |
 | `MAX_PAGES_PER_RUN` | Pages to scrape per run (default: `15`) |
 | `SCRAPE_WINDOW_MINUTES` | Minutes to spread page fetches across (default: `120`) |
+| `LIVE_MAX_LISTINGS_PER_RUN` | Max detail pages to visit per production run (default: unlimited). No effect in `TEST_MODE`. |
+| `TEST_MODE` | `true` to run in safe local test mode — no credentials required (default: `false`) |
+| `TEST_MAX_PAGES` | Pages to scrape in test mode (default: `1`) |
+| `TEST_MAX_LISTINGS` | Listings to process in test mode (default: `3`) |
+| `TEST_WRITE_TO_FIRESTORE` | Allow Firestore/Notion writes during test mode (default: `false`) |
+| `RUN_IMMEDIATELY` | Run the pipeline once on startup, then keep the cron scheduler running (default: `false`) |
 
 ## Architecture
 
@@ -93,6 +102,38 @@ src/
 9. Write Firestore opportunity (`status: "ready"`, expires in 10 days)
 10. Upsert Firestore contact record
 
+## Startup Modes
+
+| Mode | How | Behaviour |
+|---|---|---|
+| Scheduled-only (default) | `npm start` | Waits for the daily 08:00 UTC cron trigger |
+| Immediate + scheduled | `RUN_IMMEDIATELY=true npm start` | Runs the pipeline once on boot, then keeps the scheduler alive for subsequent daily runs |
+| One-shot (CI / manual) | `npm start -- --run-now` | Runs the pipeline once and exits |
+| Test (local dev) | `TEST_MODE=true npm run dev` | See Test Mode section below |
+
+## Test Mode
+
+Run a safe local scrape without any Firebase, Notion, or OpenAI credentials:
+
+```bash
+TEST_MODE=true npm run dev
+# or
+TEST_MODE=true TEST_MAX_PAGES=1 TEST_MAX_LISTINGS=5 npm run dev
+```
+
+**What test mode does:**
+- Scrapes `TEST_MAX_PAGES` pages (default 1) with 1–3 s delays instead of the full window
+- Visits up to `TEST_MAX_LISTINGS` detail pages (default 3) — already-seen listings are NOT skipped so you can re-run on the same ads
+- Runs the full extraction and decision pipeline (website detection, phone selection, name extraction, message generation)
+- Skips Firestore/Notion dedup reads so the pipeline always reaches the message-generation step
+- Skips all writes (Firestore, Notion, `scrapedListings`) unless `TEST_WRITE_TO_FIRESTORE=true`
+- Logs verbose `[TEST]` lines for every listing: extracted fields, phone metadata, skip reason or generated message
+
+**To allow writes in test mode** (requires real credentials in `.env`):
+```bash
+TEST_MODE=true TEST_WRITE_TO_FIRESTORE=true npm run dev
+```
+
 ## Scrape Timing
 
 The scraper runs in two sequential phases:
@@ -109,6 +150,23 @@ The scraper runs in two sequential phases:
 **Rate-limit / block detection**
 - HTTP 429, 403, 503, or CAPTCHA content causes an immediate stop with a `[SCRAPER HEALTH]` warning logged.
 - The run aborts and retries on the next scheduled cron invocation. Delays are never reduced on errors.
+
+## Phone Reveal
+
+Kijiji hides phone numbers behind a JavaScript-triggered button. The scraper uses a hybrid approach:
+
+- **Axios + Cheerio** (default): fetches and parses every listing detail page statically
+- **Playwright** (fallback): launched only when the static HTML contains a "Show phone number" button and no phone was found in the description text
+
+Playwright opens a headless Chromium instance, clicks the reveal button, waits for a `tel:` link to appear, and extracts the number. The browser is closed immediately after. To minimize detection risk, Playwright is launched at most once per listing and only when a reveal button is confirmed in the static HTML.
+
+**Playwright browser binaries must be installed separately after `npm install`:**
+
+```bash
+npx playwright install chromium
+```
+
+On the VPS, run this once after deploying. Chromium is not bundled with the `playwright` npm package.
 
 ## TODOs
 

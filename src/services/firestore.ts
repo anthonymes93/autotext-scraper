@@ -5,15 +5,32 @@ import type { FirestoreContact, FirestoreOpportunity, QualifiedLead, ScrapedList
 
 let _db: FirebaseFirestore.Firestore | null = null;
 
+// Dotenv may or may not expand \n in quoted values depending on version and quoting style.
+// If the key already contains real newlines, use it as-is; otherwise convert literal \n sequences.
+function parsePrivateKey(raw: string): string {
+  if (raw.includes("\n")) return raw;
+  return raw.replace(/\\n/g, "\n");
+}
+
 function getDb(): FirebaseFirestore.Firestore {
   if (_db) return _db;
 
   if (!admin.apps.length) {
+    const rawKey = env.FIREBASE_PRIVATE_KEY;
+
+    if (env.TEST_MODE) {
+      logger.info("[TEST] Firebase private key diagnostic", {
+        keyLength: rawKey.length,
+        hasLiteralEscapedNewlines: rawKey.includes("\\n"),
+        hasRealNewlines: rawKey.includes("\n"),
+      });
+    }
+
     admin.initializeApp({
       credential: admin.credential.cert({
         projectId: env.FIREBASE_PROJECT_ID,
         clientEmail: env.FIREBASE_CLIENT_EMAIL,
-        privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        privateKey: parsePrivateKey(rawKey),
       }),
     });
   }
@@ -104,8 +121,8 @@ export async function upsertContact(lead: QualifiedLead): Promise<void> {
 
   const contact: FirestoreContact = {
     phone,
-    firstName: lead.outreachName,
-    companyName: null,
+    firstName: lead.firstName,
+    companyName: lead.companyName,
     location: lead.location,
     source: "kijiji",
     firstSeenAt: now,
@@ -129,16 +146,28 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
     listingUrl: lead.listingUrl,
     title: lead.title,
     location: lead.location,
-    phone: lead.phone.e164,
-    outreachMessage: lead.outreachMessage,
-    outreachName: lead.outreachName,
+    phoneNumber: lead.phone.e164,
+    allPhoneNumbers: lead.allPhoneNumbers,
+    phoneCount: lead.phoneCount,
+    phoneSelectionReason: lead.phoneSelectionReason,
+    textMessage: lead.outreachMessage,
+    firstName: lead.firstName,
+    companyName: lead.companyName,
     status: "ready",
     createdAt: now,
     expiresAt,
     source: "kijiji",
   };
 
+  if (env.TEST_MODE) {
+    logger.info("[TEST] Opportunity payload", {
+      ...opportunity,
+      createdAt: opportunity.createdAt.toDate().toISOString(),
+      expiresAt: opportunity.expiresAt.toDate().toISOString(),
+    });
+  }
+
   const docRef = await db.collection("opportunities").add(opportunity);
-  logger.info("Created opportunity", { id: docRef.id, phone: lead.phone.e164 });
+  logger.info("Created opportunity", { id: docRef.id, phoneNumber: lead.phone.e164 });
   return docRef.id;
 }

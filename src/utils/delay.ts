@@ -5,9 +5,13 @@ function withJitter(baseMs: number): number {
   return Math.floor(baseMs - swing + Math.random() * swing * 2);
 }
 
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function delay(minMs: number, maxMs: number): Promise<void> {
   const ms = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return sleep(ms);
 }
 
 export function computePageDelayMs(windowMinutes: number, maxPages: number): number {

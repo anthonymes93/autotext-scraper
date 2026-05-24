@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test:notion-phone": "tsx src/scripts/testNotionPhone.ts"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -19,6 +20,7 @@
     "firebase-admin": "^12.2.0",
     "node-cron": "^3.0.3",
     "openai": "^4.52.0",
+    "playwright": "^1.60.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

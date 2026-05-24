@@ -1,13 +1,17 @@
+import fs from "fs";
+import path from "path";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
 type CheerioAPI = ReturnType<typeof cheerio.load>;
-import { listingDelay, pageDelay, computePageDelayMs } from "../utils/delay.js";
+import { sleep, pageDelay, computePageDelayMs, shortDelay } from "../utils/delay.js";
 import { logger } from "../utils/logger.js";
 import { env } from "../config/env.js";
 import { extractListingId, listingAlreadySeen, markListingSeen } from "../services/firestore.js";
 import { extractPhonesFromText } from "../parsers/phone.js";
+import { revealPhoneWithPlaywright, REVEAL_BUTTON_SELECTORS } from "./playwrightReveal.js";
 import { extractWebsitesFromText } from "../parsers/website.js";
+import { extractFirstName, extractCompanyName } from "../parsers/names.js";
 import { normalizeWhitespace } from "../utils/normalize.js";
 import type { RawListing } from "../types/lead.js";
 
@@ -79,46 +83,202 @@ async function fetchHtml(url: string): Promise<string | null> {
   }
 }
 
-async function extractListingUrls(searchUrl: string): Promise<string[]> {
+// Matches Kijiji listing detail URLs:
+//   /v-{category}/{location}/{slug}/{7+digit-id}
+//   /b-{category}/{location}/{7+digit-id}
+// Excludes browse/category pages that end with c{n}l{n} codes.
+const LISTING_URL_RE = /\/[vb]-[^/]+.*\/(\d{7,})(?:[?#].*)?$/;
+
+function isKijijiListingUrl(url: string): boolean {
+  return url.includes("kijiji.ca") && LISTING_URL_RE.test(url);
+}
+
+function toAbsolute(href: string): string {
+  if (href.startsWith("http")) return href;
+  return `https://www.kijiji.ca${href}`;
+}
+
+function saveDebugHtml(html: string, filename: string): void {
+  try {
+    const dir = path.join(process.cwd(), "debug");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, filename), html, "utf8");
+    logger.debug("[TEST] Saved debug HTML", { file: path.join("debug", filename) });
+  } catch (err) {
+    logger.warn("[TEST] Failed to save debug HTML", { err: String(err) });
+  }
+}
+
+async function extractListingUrls(searchUrl: string, pageNum: number = 1): Promise<string[]> {
   const html = await fetchHtml(searchUrl);
   if (!html) return [];
 
-  const $ = cheerio.load(html);
-  const urls: string[] = [];
+  if (env.TEST_MODE) {
+    logger.info("[TEST] Fetched search page", { url: searchUrl, htmlLength: html.length });
+    saveDebugHtml(html, `kijiji-search-page${pageNum > 1 ? `-${pageNum}` : ""}.html`);
+  }
 
-  // TODO: Confirm these selectors against live Kijiji markup — they change periodically
-  $("a[data-listing-id]").each((_, el) => {
+  const $ = cheerio.load(html);
+  const allAnchors = $("a[href]");
+
+  logger.debug("Scanning anchors for listing URLs", {
+    totalAnchors: allAnchors.length,
+    searchUrl,
+  });
+
+  const candidates: string[] = [];
+  allAnchors.each((_, el) => {
     const href = $(el).attr("href");
-    if (href) {
-      const absolute = href.startsWith("http") ? href : `https://www.kijiji.ca${href}`;
-      urls.push(absolute);
+    if (!href) return;
+    const absolute = toAbsolute(href);
+    if (isKijijiListingUrl(absolute)) {
+      candidates.push(absolute);
     }
   });
 
-  logger.info("Found listing URLs on search page", { count: urls.length, searchUrl });
-  return urls;
+  logger.debug("Candidate listing URLs found", { candidates: candidates.length, searchUrl });
+
+  const unique = [...new Set(candidates)];
+
+  logger.info("Found listing URLs on search page", {
+    totalAnchors: allAnchors.length,
+    candidates: candidates.length,
+    unique: unique.length,
+    searchUrl,
+  });
+
+  return unique;
+}
+
+function parseJsonLd($: CheerioAPI): Record<string, unknown> | null {
+  const candidates: Record<string, unknown>[] = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const raw = $( el).html() ?? "";
+      const parsed: unknown = JSON.parse(raw);
+      const obj = Array.isArray(parsed) ? parsed[0] : parsed;
+      if (obj && typeof obj === "object") {
+        candidates.push(obj as Record<string, unknown>);
+      }
+    } catch {
+      // ignore malformed JSON-LD
+    }
+  });
+  return candidates.find((o) => "name" in o) ?? candidates[0] ?? null;
 }
 
 async function scrapeListingPage(url: string): Promise<RawListing | null> {
   const html = await fetchHtml(url);
   if (!html) return null;
 
-  const $ = cheerio.load(html);
+  const listingId = extractListingId(url) ?? undefined;
 
-  // TODO: Verify these selectors against live Kijiji listing markup
-  const title = normalizeWhitespace($("h1[class*='title']").first().text() || "");
+  if (env.TEST_MODE) {
+    logger.info("[TEST] Fetched listing detail page", { url, htmlLength: html.length, listingId });
+    saveDebugHtml(html, `listing-${listingId ?? "unknown"}.html`);
+  }
+
+  const $ = cheerio.load(html);
+  const jsonLd = parseJsonLd($);
+
+  // ─── Title ───────────────────────────────────────────────────────────────
+  let title = "";
+  let titleStrategy = "";
+
+  const h1 = normalizeWhitespace($("h1").first().text());
+  if (h1) { title = h1; titleStrategy = "h1"; }
+
+  if (!title) {
+    const og = $('meta[property="og:title"]').attr("content") ?? "";
+    const ogClean = normalizeWhitespace(og);
+    if (ogClean) { title = ogClean; titleStrategy = "og:title"; }
+  }
+
+  if (!title) {
+    const raw = $("title").first().text().replace(/\s*[-|]\s*Kijiji.*$/i, "");
+    const tagClean = normalizeWhitespace(raw);
+    if (tagClean) { title = tagClean; titleStrategy = "title-tag"; }
+  }
+
+  if (!title && jsonLd) {
+    const ldName = typeof jsonLd["name"] === "string" ? normalizeWhitespace(jsonLd["name"]) : "";
+    if (ldName) { title = ldName; titleStrategy = "json-ld.name"; }
+  }
+
+  if (title) {
+    logger.debug("Title extracted", { strategy: titleStrategy, title, url });
+  }
+
+  // ─── Description ─────────────────────────────────────────────────────────
+  let description = "";
+  let descStrategy = "";
+
+  const descSelectors = [
+    "[class*='descriptionContainer']",
+    "[data-testid*='description']",
+    "#pstad-descrptn",
+    "[class*='description-container']",
+  ];
+  for (const sel of descSelectors) {
+    const text = normalizeWhitespace($(sel).first().text());
+    if (text) { description = text; descStrategy = sel; break; }
+  }
+
+  if (!description) {
+    const og = $('meta[property="og:description"]').attr("content") ?? "";
+    const ogClean = normalizeWhitespace(og);
+    if (ogClean) { description = ogClean; descStrategy = "og:description"; }
+  }
+
+  if (!description && jsonLd) {
+    const ldDesc = typeof jsonLd["description"] === "string"
+      ? normalizeWhitespace(jsonLd["description"])
+      : "";
+    if (ldDesc) { description = ldDesc; descStrategy = "json-ld.description"; }
+  }
+
+  if (description) {
+    logger.debug("Description extracted", { strategy: descStrategy, length: description.length, url });
+  }
+
+  // ─── Seller name ──────────────────────────────────────────────────────────
   const sellerName =
     normalizeWhitespace(
-      $("[class*='sellerName'], [class*='seller-name']").first().text() || ""
+      $("[class*='sellerName'], [class*='seller-name'], [data-testid*='seller-name']")
+        .first()
+        .text() || ""
     ) || undefined;
-  const location =
-    normalizeWhitespace(
-      $("[class*='address'], [class*='location']").first().text() || ""
-    ) || undefined;
-  const description = normalizeWhitespace(
-    $("[class*='descriptionContainer'], #pstad-descrptn").first().text() || ""
-  );
 
+  // ─── Location ────────────────────────────────────────────────────────────
+  let location: string | undefined;
+  let locationStrategy = "";
+
+  const locationSelectors = [
+    "[data-testid*='location']",
+    "[class*='address']",
+    "[class*='location']",
+  ];
+  for (const sel of locationSelectors) {
+    const text = normalizeWhitespace($(sel).first().text());
+    if (text) { location = text; locationStrategy = sel; break; }
+  }
+
+  if (!location && jsonLd) {
+    const addr = jsonLd["address"];
+    if (addr && typeof addr === "object") {
+      const a = addr as Record<string, unknown>;
+      const city = typeof a["addressLocality"] === "string" ? a["addressLocality"] : "";
+      const region = typeof a["addressRegion"] === "string" ? a["addressRegion"] : "";
+      const parts = [city, region].filter(Boolean);
+      if (parts.length) { location = parts.join(", "); locationStrategy = "json-ld.address"; }
+    }
+  }
+
+  if (location) {
+    logger.debug("Location extracted", { strategy: locationStrategy, location, url });
+  }
+
+  // ─── Website ─────────────────────────────────────────────────────────────
   const sidebarWebsiteHref = $("a[class*='websiteLink'], a[href*='website']")
     .first()
     .attr("href");
@@ -131,7 +291,7 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
 
   let revealedPhone: string | undefined;
 
-  // Only trigger phone reveal if no phone was found in description text
+  // Only trigger phone reveal if no phone was found in description text.
   if (descriptionPhones.length === 0) {
     revealedPhone = await tryRevealPhone($, url);
   } else {
@@ -140,12 +300,20 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
 
   if (!title) {
     logger.warn("Could not extract title from listing", { url });
+    if (env.TEST_MODE) {
+      const bodyPreview = normalizeWhitespace($("body").text()).slice(0, 500);
+      logger.info("[TEST] Body text preview (title extraction failed)", { url, bodyPreview });
+    }
     return null;
   }
 
+  // Extract names with high confidence so leadDecision doesn't re-run parsers.
+  const firstName = sellerName ? extractFirstName(sellerName) ?? undefined : undefined;
+  const companyName = sellerName ? extractCompanyName(sellerName) ?? undefined : undefined;
+
   return {
     url,
-    listingId: extractListingId(url) ?? undefined,
+    listingId,
     title,
     sellerName,
     location,
@@ -154,41 +322,76 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
     descriptionWebsites,
     descriptionPhones,
     revealedPhone,
+    firstName,
+    companyName,
   };
 }
 
-async function tryRevealPhone(
-  $: CheerioAPI,
-  url: string
-): Promise<string | undefined> {
-  // TODO: Implement actual phone reveal — Kijiji uses a JS-triggered API call
-  // This likely requires a headless browser (Puppeteer) or reverse-engineered API endpoint
-  logger.debug("Phone reveal attempted (not yet implemented)", { url });
-  void $;
-  return undefined;
+// Additional static selectors not covered by the shared REVEAL_BUTTON_SELECTORS list.
+const STATIC_ONLY_REVEAL_SELECTORS = ["a[href*='ShowPhoneNumber']"];
+const STATIC_REVEAL_TEXT_RE = /show\s+phone/i;
+
+function hasRevealButtonInStaticHtml($: CheerioAPI): boolean {
+  const allSelectors = [...REVEAL_BUTTON_SELECTORS, ...STATIC_ONLY_REVEAL_SELECTORS];
+  if (allSelectors.some((sel) => $(sel).length > 0)) return true;
+  return $("button, a")
+    .toArray()
+    .some((el) => STATIC_REVEAL_TEXT_RE.test($(el).text()));
+}
+
+async function tryRevealPhone($: CheerioAPI, url: string): Promise<string | undefined> {
+  if (!hasRevealButtonInStaticHtml($)) {
+    logger.debug("No phone reveal button in static HTML", { url });
+    return undefined;
+  }
+
+  logger.info("Phone reveal button detected, launching Playwright", { url });
+
+  const revealedRaw = await revealPhoneWithPlaywright(url);
+  if (!revealedRaw) {
+    logger.warn("Phone reveal: Playwright returned no phone text", { url });
+    return undefined;
+  }
+
+  const phones = extractPhonesFromText(revealedRaw);
+  if (phones.length === 0) {
+    logger.warn("Phone reveal: text returned but no phone pattern matched", {
+      url,
+      revealedText: revealedRaw.slice(0, 100),
+    });
+    return undefined;
+  }
+
+  logger.info("Phone reveal success", { url, phone: phones[0] });
+  return phones[0];
 }
 
 async function collectListingUrls(): Promise<string[]> {
   const seenUrls = new Set<string>();
-  const { MAX_PAGES_PER_RUN: maxPages, SCRAPE_WINDOW_MINUTES: windowMinutes } = env;
+  const isTest = env.TEST_MODE;
+  const maxPages = isTest ? env.TEST_MAX_PAGES : env.MAX_PAGES_PER_RUN;
+  const windowMinutes = env.SCRAPE_WINDOW_MINUTES;
 
-  const basePageDelayMs = computePageDelayMs(windowMinutes, maxPages);
-  const jitterRange = Math.round(basePageDelayMs * 0.25 / 1000);
-  const estimatedMinutes = Math.round((basePageDelayMs * maxPages) / 60_000);
-
-  logger.info("Starting page collection", {
-    maxPages,
-    windowMinutes,
-    pageDelaySeconds: Math.round(basePageDelayMs / 1000),
-    pageDelayJitterSeconds: `±${jitterRange}s`,
-    estimatedPagePhaseMinutes: estimatedMinutes,
-  });
+  if (isTest) {
+    logger.info("[TEST MODE] Page collection", { maxPages, listingCap: env.TEST_MAX_LISTINGS });
+  } else {
+    const basePageDelayMs = computePageDelayMs(windowMinutes, maxPages);
+    const jitterRange = Math.round((basePageDelayMs * 0.25) / 1000);
+    const estimatedMinutes = Math.round((basePageDelayMs * maxPages) / 60_000);
+    logger.info("Starting page collection", {
+      maxPages,
+      windowMinutes,
+      pageDelaySeconds: Math.round(basePageDelayMs / 1000),
+      pageDelayJitterSeconds: `±${jitterRange}s`,
+      estimatedPagePhaseMinutes: estimatedMinutes,
+    });
+  }
 
   for (let page = 1; page <= maxPages; page++) {
     const pageUrl = buildPageUrl(page);
     logger.info("Scraping search page", { page, url: pageUrl });
 
-    const pageUrls = await extractListingUrls(pageUrl);
+    const pageUrls = await extractListingUrls(pageUrl, page);
 
     if (pageUrls.length === 0) {
       logger.info("No listings found on page, stopping pagination early", { page });
@@ -206,7 +409,11 @@ async function collectListingUrls(): Promise<string[]> {
     });
 
     if (page < maxPages) {
-      await pageDelay(windowMinutes, maxPages);
+      if (isTest) {
+        await shortDelay();
+      } else {
+        await pageDelay(windowMinutes, maxPages);
+      }
     }
   }
 
@@ -217,20 +424,50 @@ export async function runScraper(): Promise<RawListing[]> {
   const allListings: RawListing[] = [];
   let alreadySeenCount = 0;
   let newCount = 0;
+  let visitCount = 0; // counts actual HTTP requests to detail pages
+  const isTest = env.TEST_MODE;
+  const listingCap = isTest
+    ? env.TEST_MAX_LISTINGS
+    : (env.LIVE_MAX_LISTINGS_PER_RUN ?? Infinity);
+  const capDisplay = listingCap === Infinity ? "unlimited" : listingCap;
+  const delayMinS = env.FAST_TEST_MODE ? 1 : env.DETAIL_DELAY_MIN_SECONDS;
+  const delayMaxS = env.FAST_TEST_MODE ? 3 : env.DETAIL_DELAY_MAX_SECONDS;
 
   const listingUrls = await collectListingUrls();
 
-  const estimatedListingMinutes = Math.round((listingUrls.length * 20_000) / 60_000);
-  logger.info("Starting listing detail scrape", {
-    total: listingUrls.length,
-    listingDelayRangeSeconds: "10–30",
-    estimatedListingPhaseMinutes: estimatedListingMinutes,
-  });
+  if (isTest) {
+    logger.info("[TEST MODE] Starting detail scrape", {
+      collected: listingUrls.length,
+      cap: listingCap,
+      fastTestMode: env.FAST_TEST_MODE,
+      delayRangeSeconds: `${delayMinS}–${delayMaxS}`,
+    });
+  } else {
+    const toVisit = listingCap === Infinity ? listingUrls.length : Math.min(listingUrls.length, listingCap);
+    const avgDelayMs = ((delayMinS + delayMaxS) / 2) * 1000;
+    const estimatedListingMinutes = Math.round((toVisit * avgDelayMs) / 60_000);
+    logger.info("Starting listing detail scrape", {
+      collected: listingUrls.length,
+      liveListingCap: capDisplay,
+      willVisit: toVisit,
+      delayRangeSeconds: `${delayMinS}–${delayMaxS}`,
+      estimatedListingPhaseMinutes: estimatedListingMinutes,
+    });
+  }
 
   for (const listingUrl of listingUrls) {
+    if (visitCount >= listingCap) {
+      logger.info("Live listing cap reached, stopping detail scrape", {
+        visited: visitCount,
+        cap: listingCap,
+      });
+      break;
+    }
+
     const listingId = extractListingId(listingUrl);
 
-    if (listingId) {
+    // In test mode: always visit the page so extraction logic can be observed.
+    if (!isTest && listingId) {
       const seen = await listingAlreadySeen(listingId);
       if (seen) {
         alreadySeenCount++;
@@ -239,25 +476,37 @@ export async function runScraper(): Promise<RawListing[]> {
       }
     }
 
-    logger.debug("Visiting new listing", { url: listingUrl });
+    // Apply delay before every visit except the first.
+    if (visitCount > 0) {
+      const delaySecs = Math.round(delayMinS + Math.random() * (delayMaxS - delayMinS));
+      logger.info("Waiting before next listing detail page", {
+        delaySeconds: delaySecs,
+        listing: visitCount + 1,
+        of: capDisplay,
+      });
+      await sleep(delaySecs * 1000);
+    }
+
+    visitCount++;
+    logger.debug("Visiting listing", { url: listingUrl, testMode: isTest });
     const listing = await scrapeListingPage(listingUrl);
 
     if (listing) {
       newCount++;
       allListings.push(listing);
-      logger.info("Scraped new listing", { url: listingUrl, title: listing.title });
+      logger.info("Scraped listing", { url: listingUrl, title: listing.title });
 
-      if (listingId) {
+      // Only mark seen in production so test runs don't pollute scrapedListings.
+      if (!isTest && listingId) {
         await markListingSeen(listingId, listingUrl);
       }
     }
-
-    await listingDelay();
   }
 
   logger.info("Detail scrape complete", {
     collected: listingUrls.length,
     alreadySeen: alreadySeenCount,
+    visited: visitCount,
     newlyScraped: newCount,
   });
 
