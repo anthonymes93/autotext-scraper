@@ -107,7 +107,7 @@ src/
 
 | Mode | How | Behaviour |
 |---|---|---|
-| Scheduled-only (default) | `npm start` | Waits for the daily 18:00 UTC cron trigger |
+| Scheduled-only (default) | `npm start` | Waits for the daily 17:53 UTC cron trigger |
 | Immediate + scheduled | `RUN_IMMEDIATELY=true npm start` | Runs the pipeline once on boot, then keeps the scheduler alive for subsequent daily runs |
 | One-shot (CI / manual) | `npm start -- --run-now` | Runs the pipeline once and exits |
 | Test (local dev) | `TEST_MODE=true npm run dev` | See Test Mode section below |

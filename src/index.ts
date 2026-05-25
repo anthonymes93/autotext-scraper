@@ -221,8 +221,8 @@ async function runPipeline(): Promise<void> {
 }
 
 function startScheduler(): void {
-  // Runs daily at 18:00 UTC
-  cron.schedule("0 18 * * *", async () => {
+  // Runs daily at 17:53 UTC
+  cron.schedule("53 17 * * *", async () => {
     logger.info("Cron job triggered");
     try {
       await runPipeline();
@@ -231,7 +231,7 @@ function startScheduler(): void {
     }
   });
 
-  logger.info("Scheduler started - pipeline will run daily at 18:00 UTC");
+  logger.info("Scheduler started - pipeline will run daily at 17:53 UTC");
 }
 
 async function main(): Promise<void> {
@@ -258,7 +258,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  logger.info("Startup mode: scheduled-only - pipeline will run daily at 18:00 UTC");
+  logger.info("Startup mode: scheduled-only - pipeline will run daily at 17:53 UTC");
   startScheduler();
 }
 
