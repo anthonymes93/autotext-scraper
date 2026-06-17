@@ -167,6 +167,63 @@ function parseJsonLd($: CheerioAPI): Record<string, unknown> | null {
   return candidates.find((o) => "name" in o) ?? candidates[0] ?? null;
 }
 
+// Extracts the seller profile URL from Kijiji's embedded __NEXT_DATA__ Apollo cache.
+// Kijiji embeds full listing + profile data as server-side Apollo state on every listing page.
+// Works for both FSBO sellers (StandardProfileV2 → /o-profile/<id>/1)
+// and commercial/pro sellers (CommercialProfileV2 → /o-<slug>/<id>/listings/1).
+// Falls back to a Cheerio href selector if JSON parsing fails.
+function parseSellerProfileUrl($: CheerioAPI, listingId: string | undefined): string | null {
+  try {
+    const raw = $("script#__NEXT_DATA__").html() ?? "";
+    if (!raw) return null;
+
+    const nextData = JSON.parse(raw) as Record<string, unknown>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const apollo = (nextData as any)?.props?.pageProps?.__APOLLO_STATE__;
+    if (!apollo || typeof apollo !== "object") return null;
+
+    // Resolve posterId from the listing's posterInfo for an exact match.
+    let posterId: string | null = null;
+    if (listingId) {
+      const listingEntry = (apollo as Record<string, unknown>)[`StandardListing:${listingId}`] as Record<string, unknown> | undefined;
+      const posterInfo = listingEntry?.["posterInfo"] as Record<string, unknown> | undefined;
+      if (typeof posterInfo?.["posterId"] === "string" || typeof posterInfo?.["posterId"] === "number") {
+        posterId = String(posterInfo["posterId"]);
+      }
+    }
+
+    let profilePath: string | null = null;
+
+    if (posterId) {
+      const apolloMap = apollo as Record<string, unknown>;
+      const profileEntry =
+        (apolloMap[`StandardProfileV2:${posterId}`] as Record<string, unknown> | undefined) ??
+        (apolloMap[`CommercialProfileV2:${posterId}`] as Record<string, unknown> | undefined);
+      const pp = profileEntry?.["profilePath"];
+      if (typeof pp === "string") profilePath = pp;
+    }
+
+    // Fallback: scan Apollo keys when posterId lookup misses.
+    if (!profilePath) {
+      for (const key of Object.keys(apollo as object)) {
+        if (key.startsWith("StandardProfileV2:") || key.startsWith("CommercialProfileV2:")) {
+          const pp = ((apollo as Record<string, unknown>)[key] as Record<string, unknown> | undefined)?.["profilePath"];
+          if (typeof pp === "string") { profilePath = pp; break; }
+        }
+      }
+    }
+
+    if (profilePath) return `https://www.kijiji.ca${profilePath}`;
+  } catch {
+    // fall through to Cheerio fallback
+  }
+
+  // Cheerio fallback: the profile anchor is inside [data-testid="vip-about-seller"]
+  // and starts with /o- for both FSBO (/o-profile/) and commercial (/o-<slug>/) profiles.
+  const fallbackHref = $('[data-testid="vip-about-seller"] a[href^="/o-"]').first().attr("href");
+  return fallbackHref ? `https://www.kijiji.ca${fallbackHref}` : null;
+}
+
 async function scrapeListingPage(url: string): Promise<RawListing | null> {
   const html = await fetchHtml(url);
   if (!html) return null;
@@ -311,6 +368,12 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
   const firstName = sellerName ? extractFirstName(sellerName) ?? undefined : undefined;
   const companyName = sellerName ? extractCompanyName(sellerName) ?? undefined : undefined;
 
+  // ─── Seller profile URL ───────────────────────────────────────────────────
+  const sellerProfileUrl = parseSellerProfileUrl($, listingId) ?? undefined;
+  if (sellerProfileUrl) {
+    logger.debug("Seller profile URL extracted", { sellerProfileUrl, url });
+  }
+
   return {
     url,
     listingId,
@@ -324,6 +387,7 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
     revealedPhone,
     firstName,
     companyName,
+    sellerProfileUrl,
   };
 }
 

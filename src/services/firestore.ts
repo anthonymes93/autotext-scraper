@@ -1,7 +1,7 @@
 import admin from "firebase-admin";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
-import type { FirestoreContact, FirestoreOpportunity, QualifiedLead, ScrapedListing } from "../types/lead.js";
+import type { FirestoreContact, FirestoreOpportunity, FirestoreWebsiteOpportunity, QualifiedLead, RawListing, ScrapedListing } from "../types/lead.js";
 
 let _db: FirebaseFirestore.Firestore | null = null;
 
@@ -144,6 +144,7 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
 
   const opportunity: FirestoreOpportunity = {
     listingUrl: lead.listingUrl,
+    listingId: extractListingId(lead.listingUrl),
     title: lead.title,
     location: lead.location,
     phoneNumber: lead.phone.e164,
@@ -153,8 +154,11 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
     textMessage: lead.outreachMessage,
     firstName: lead.firstName,
     companyName: lead.companyName,
+    rawDescription: lead.rawDescription,
+    sellerProfileUrl: lead.sellerProfileUrl,
     status: "ready",
     createdAt: now,
+    scrapedAt: admin.firestore.Timestamp.fromDate(lead.scrapedAt),
     expiresAt,
     source: "kijiji",
   };
@@ -169,5 +173,44 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
 
   const docRef = await db.collection("opportunities").add(opportunity);
   logger.info("Created opportunity", { id: docRef.id, phoneNumber: lead.phone.e164 });
+  return docRef.id;
+}
+
+export async function createWebsiteDetectedOpportunity(
+  listing: RawListing,
+  websiteUrl: string,
+  websiteFoundIn: "sidebar" | "description"
+): Promise<string> {
+  const db = getDb();
+  const now = admin.firestore.Timestamp.now();
+
+  const opportunity: FirestoreWebsiteOpportunity = {
+    listingUrl: listing.url,
+    listingId: listing.listingId ?? extractListingId(listing.url),
+    title: listing.title,
+    location: listing.location ?? null,
+    sellerName: listing.sellerName ?? null,
+    firstName: listing.firstName ?? null,
+    companyName: listing.companyName ?? null,
+    rawDescription: listing.description,
+    sellerProfileUrl: listing.sellerProfileUrl ?? null,
+    websiteUrl,
+    websiteFoundIn,
+    status: "website_detected",
+    createdAt: now,
+    scrapedAt: now,
+    source: "kijiji",
+  };
+
+  if (env.TEST_MODE) {
+    logger.info("[TEST] Website opportunity payload", {
+      ...opportunity,
+      createdAt: opportunity.createdAt.toDate().toISOString(),
+      scrapedAt: opportunity.scrapedAt.toDate().toISOString(),
+    });
+  }
+
+  const docRef = await db.collection("opportunities").add(opportunity);
+  logger.info("Created website_detected opportunity", { id: docRef.id, websiteUrl, websiteFoundIn });
   return docRef.id;
 }

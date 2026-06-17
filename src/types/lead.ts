@@ -16,6 +16,7 @@ export const RawListingSchema = z.object({
   // Name fields — set only when confidence is HIGH during scraping
   firstName: z.string().optional(),
   companyName: z.string().optional(),
+  sellerProfileUrl: z.string().optional(),
 });
 
 export type RawListing = z.infer<typeof RawListingSchema>;
@@ -50,11 +51,13 @@ export interface QualifiedLead {
   firstName: string | null;
   companyName: string | null;
   rawDescription: string;
+  sellerProfileUrl: string | null;
   scrapedAt: Date;
 }
 
 export interface FirestoreOpportunity {
   listingUrl: string;
+  listingId: string | null;
   title: string;
   location: string;
   phoneNumber: string;
@@ -64,9 +67,32 @@ export interface FirestoreOpportunity {
   textMessage: string;
   firstName: string | null;
   companyName: string | null;
+  rawDescription: string;
+  sellerProfileUrl: string | null;
   status: "ready";
   createdAt: FirebaseFirestore.Timestamp;
+  scrapedAt: FirebaseFirestore.Timestamp;
   expiresAt: FirebaseFirestore.Timestamp;
+  source: "kijiji";
+}
+
+// Preserved when a website is detected — not eligible for outreach queue.
+// Query with where("status", "==", "website_detected") for relationship tracking.
+export interface FirestoreWebsiteOpportunity {
+  listingUrl: string;
+  listingId: string | null;
+  title: string;
+  location: string | null;
+  sellerName: string | null;
+  firstName: string | null;
+  companyName: string | null;
+  rawDescription: string;
+  sellerProfileUrl: string | null;
+  websiteUrl: string;
+  websiteFoundIn: "sidebar" | "description";
+  status: "website_detected";
+  createdAt: FirebaseFirestore.Timestamp;
+  scrapedAt: FirebaseFirestore.Timestamp;
   source: "kijiji";
 }
 
@@ -92,7 +118,6 @@ export interface FirestoreContact {
 }
 
 export type SkipReason =
-  | "has_website"
   | "no_phone"
   | "invalid_phone"
   | "duplicate_firestore"
@@ -103,5 +128,6 @@ export type SkipReason =
 
 export type PipelineResult =
   | { url: string; status: "created"; phone: string; lead: QualifiedLead }
+  | { url: string; status: "website_detected"; websiteUrl: string; websiteFoundIn: "sidebar" | "description" }
   | { url: string; status: "skipped"; skipReason: SkipReason; phone?: string }
   | { url: string; status: "error"; error: string };

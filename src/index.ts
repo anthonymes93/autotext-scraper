@@ -2,7 +2,7 @@ import "./config/env.js";
 import cron from "node-cron";
 import { runScraper, ScraperBlockedError } from "./scraper/kijiji.js";
 import { processListing } from "./services/leadDecision.js";
-import { createOpportunity, upsertContact, updateListingStatus } from "./services/firestore.js";
+import { createOpportunity, createWebsiteDetectedOpportunity, upsertContact, updateListingStatus } from "./services/firestore.js";
 import { addLeadToNotion, phoneExistsInNotion } from "./services/notion.js";
 import { detectWebsite } from "./parsers/website.js";
 import { logger } from "./utils/logger.js";
@@ -47,6 +47,11 @@ function logTestDecisionSummary(listing: RawListing, result: PipelineResult): vo
   const skipReason =
     result.status === "skipped" ? result.skipReason : null;
 
+  const websiteUrl =
+    result.status === "website_detected" ? result.websiteUrl : (website?.url ?? null);
+  const websiteFoundIn =
+    result.status === "website_detected" ? result.websiteFoundIn : (website?.foundIn ?? null);
+
   logger.info("[TEST] Decision summary", {
     title: listing.title,
     listingUrl: listing.url,
@@ -54,9 +59,9 @@ function logTestDecisionSummary(listing: RawListing, result: PipelineResult): vo
     phoneNumbers: allPhoneNumbers,
     primaryPhone,
     phoneSelectionReason,
-    websiteDetected: !!website,
-    websiteUrl: website?.url ?? null,
-    websiteFoundIn: website?.foundIn ?? null,
+    websiteDetected: !!(website || result.status === "website_detected"),
+    websiteUrl,
+    websiteFoundIn,
     firstName,
     companyName,
     decision: result.status,
@@ -71,11 +76,11 @@ interface RunStats {
   total: number;
   scraped: number;
   created: number;
+  websiteOpportunities: number;
   skipped: number;
   errors: number;
   alreadySeen: number;
   revealButtonUsed: number;
-  websiteDetected: number;
 }
 
 async function runPipeline(): Promise<void> {
@@ -102,11 +107,11 @@ async function runPipeline(): Promise<void> {
     total: 0,
     scraped: 0,
     created: 0,
+    websiteOpportunities: 0,
     skipped: 0,
     errors: 0,
     alreadySeen: 0,
     revealButtonUsed: 0,
-    websiteDetected: 0,
   };
 
   let listings: Awaited<ReturnType<typeof runScraper>>;
@@ -126,10 +131,6 @@ async function runPipeline(): Promise<void> {
   for (const listing of listings) {
     stats.total++;
 
-    if (listing.sidebarWebsite || listing.descriptionWebsites.length > 0) {
-      stats.websiteDetected++;
-    }
-
     if (listing.revealedPhone) {
       stats.revealButtonUsed++;
     }
@@ -146,6 +147,22 @@ async function runPipeline(): Promise<void> {
 
     if (env.TEST_MODE) {
       logTestDecisionSummary(listing, result);
+    }
+
+    if (result.status === "website_detected") {
+      stats.websiteOpportunities++;
+      if (env.TEST_MODE && !env.TEST_WRITE_TO_FIRESTORE) {
+        logger.info("[TEST] Skipping website_detected Firestore write (TEST_WRITE_TO_FIRESTORE not set)", {
+          url: result.url,
+          websiteUrl: result.websiteUrl,
+        });
+      } else {
+        await createWebsiteDetectedOpportunity(listing, result.websiteUrl, result.websiteFoundIn);
+      }
+      if (!env.TEST_MODE && listing.listingId) {
+        await updateListingStatus(listing.listingId, "skipped");
+      }
+      continue;
     }
 
     if (result.status === "skipped") {
@@ -213,10 +230,10 @@ async function runPipeline(): Promise<void> {
     scraped: stats.scraped,
     alreadySeen: stats.alreadySeen,
     created: stats.created,
+    websiteOpportunities: stats.websiteOpportunities,
     skipped: stats.skipped,
     errors: stats.errors,
     revealButtonUsed: stats.revealButtonUsed,
-    websiteDetected: stats.websiteDetected,
   });
 }
 

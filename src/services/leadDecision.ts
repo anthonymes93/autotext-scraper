@@ -32,11 +32,15 @@ function buildOutreachMessage(firstName: string | null, companyName: string | nu
 export async function processListing(listing: RawListing): Promise<PipelineResult> {
   const { url } = listing;
 
-  // Step 1: Website detection — skip immediately if any business website found
+  // Step 1: Website detection — preserve as website_detected opportunity instead of discarding
   const website = detectWebsite(listing.sidebarWebsite, listing.descriptionWebsites);
   if (website) {
-    logger.info("Skipped: has website", { url, websiteUrl: website.url, foundIn: website.foundIn });
-    return { url, status: "skipped", skipReason: "has_website" };
+    logger.info("Website detected — preserving as website_detected opportunity", {
+      url,
+      websiteUrl: website.url,
+      foundIn: website.foundIn,
+    });
+    return { url, status: "website_detected", websiteUrl: website.url, websiteFoundIn: website.foundIn };
   }
   logger.debug("Step 1 passed: no website detected", { url });
 
@@ -169,6 +173,7 @@ export async function processListing(listing: RawListing): Promise<PipelineResul
     firstName,
     companyName,
     rawDescription: listing.description,
+    sellerProfileUrl: listing.sellerProfileUrl ?? null,
     scrapedAt: new Date(),
   };
 
