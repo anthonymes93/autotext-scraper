@@ -33,16 +33,26 @@ export async function processListing(listing: RawListing): Promise<PipelineResul
   const { url } = listing;
 
   // Step 1: Website detection — preserve as website_detected opportunity instead of discarding
-  const website = detectWebsite(listing.sidebarWebsite, listing.descriptionWebsites);
+  const website = detectWebsite(listing.sidebarWebsite, listing.descriptionWebsites, listing.profileWebsite);
   if (website) {
     logger.info("Website detected — preserving as website_detected opportunity", {
       url,
+      listingId: listing.listingId ?? null,
+      title: listing.title,
       websiteUrl: website.url,
       foundIn: website.foundIn,
     });
     return { url, status: "website_detected", websiteUrl: website.url, websiteFoundIn: website.foundIn };
   }
-  logger.debug("Step 1 passed: no website detected", { url });
+  logger.debug("Step 1 passed: no website detected", {
+    url,
+    listingId: listing.listingId ?? null,
+    signals: {
+      sidebarWebsite: listing.sidebarWebsite ?? null,
+      profileWebsite: listing.profileWebsite ?? null,
+      descriptionWebsiteCount: listing.descriptionWebsites.length,
+    },
+  });
 
   // Step 2: Phone selection
   const phoneResult = selectPhone(listing.descriptionPhones, listing.revealedPhone);

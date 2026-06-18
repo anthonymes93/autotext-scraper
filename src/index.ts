@@ -14,7 +14,7 @@ import type { RawListing, PipelineResult } from "./types/lead.js";
 // ─── Test-mode verbose logging ────────────────────────────────────────────────
 
 function logTestDecisionSummary(listing: RawListing, result: PipelineResult): void {
-  const website = detectWebsite(listing.sidebarWebsite, listing.descriptionWebsites);
+  const website = detectWebsite(listing.sidebarWebsite, listing.descriptionWebsites, listing.profileWebsite);
 
   const allPhoneNumbers = [
     ...listing.descriptionPhones,

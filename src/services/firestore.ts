@@ -179,7 +179,7 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
 export async function createWebsiteDetectedOpportunity(
   listing: RawListing,
   websiteUrl: string,
-  websiteFoundIn: "sidebar" | "description"
+  websiteFoundIn: "sidebar" | "profile" | "description"
 ): Promise<string> {
   const db = getDb();
   const now = admin.firestore.Timestamp.now();

@@ -9,6 +9,7 @@ export const RawListingSchema = z.object({
   description: z.string(),
   // Website fields
   sidebarWebsite: z.string().optional(),
+  profileWebsite: z.string().optional(),
   descriptionWebsites: z.array(z.string()).default([]),
   // Phone fields (raw strings from page text)
   descriptionPhones: z.array(z.string()).default([]),
@@ -89,7 +90,7 @@ export interface FirestoreWebsiteOpportunity {
   rawDescription: string;
   sellerProfileUrl: string | null;
   websiteUrl: string;
-  websiteFoundIn: "sidebar" | "description";
+  websiteFoundIn: "sidebar" | "profile" | "description";
   status: "website_detected";
   createdAt: FirebaseFirestore.Timestamp;
   scrapedAt: FirebaseFirestore.Timestamp;
@@ -128,6 +129,6 @@ export type SkipReason =
 
 export type PipelineResult =
   | { url: string; status: "created"; phone: string; lead: QualifiedLead }
-  | { url: string; status: "website_detected"; websiteUrl: string; websiteFoundIn: "sidebar" | "description" }
+  | { url: string; status: "website_detected"; websiteUrl: string; websiteFoundIn: "sidebar" | "profile" | "description" }
   | { url: string; status: "skipped"; skipReason: SkipReason; phone?: string }
   | { url: string; status: "error"; error: string };

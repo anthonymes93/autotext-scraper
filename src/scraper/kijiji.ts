@@ -10,7 +10,7 @@ import { env } from "../config/env.js";
 import { extractListingId, listingAlreadySeen, markListingSeen } from "../services/firestore.js";
 import { extractPhonesFromText } from "../parsers/phone.js";
 import { revealPhoneWithPlaywright, REVEAL_BUTTON_SELECTORS } from "./playwrightReveal.js";
-import { extractWebsitesFromText } from "../parsers/website.js";
+import { extractWebsitesFromText, unwrapKijijiRedirect } from "../parsers/website.js";
 import { extractFirstName, extractCompanyName } from "../parsers/names.js";
 import { normalizeWhitespace } from "../utils/normalize.js";
 import type { RawListing } from "../types/lead.js";
@@ -167,22 +167,33 @@ function parseJsonLd($: CheerioAPI): Record<string, unknown> | null {
   return candidates.find((o) => "name" in o) ?? candidates[0] ?? null;
 }
 
-// Extracts the seller profile URL from Kijiji's embedded __NEXT_DATA__ Apollo cache.
-// Kijiji embeds full listing + profile data as server-side Apollo state on every listing page.
-// Works for both FSBO sellers (StandardProfileV2 → /o-profile/<id>/1)
-// and commercial/pro sellers (CommercialProfileV2 → /o-<slug>/<id>/listings/1).
-// Falls back to a Cheerio href selector if JSON parsing fails.
-function parseSellerProfileUrl($: CheerioAPI, listingId: string | undefined): string | null {
+interface ApolloSellerInfo {
+  profileUrl: string | null;
+  profileWebsiteUrl: string | null;
+}
+
+// Parses Kijiji's embedded __NEXT_DATA__ Apollo cache once to extract both the seller
+// profile URL and any website URL stored on the seller's profile.
+//
+// Profile URL works for both seller types:
+//   FSBO       → StandardProfileV2  → profilePath: /o-profile/<id>/1
+//   Commercial → CommercialProfileV2 → profilePath: /o-<slug>/<id>/listings/1
+//
+// Profile website URL is only present on CommercialProfileV2 entries — FSBO sellers
+// do not have a websiteUrl field in their profile node.
+function parseApolloSellerInfo($: CheerioAPI, listingId: string | undefined): ApolloSellerInfo {
+  const empty: ApolloSellerInfo = { profileUrl: null, profileWebsiteUrl: null };
+
   try {
     const raw = $("script#__NEXT_DATA__").html() ?? "";
-    if (!raw) return null;
+    if (!raw) return empty;
 
     const nextData = JSON.parse(raw) as Record<string, unknown>;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const apollo = (nextData as any)?.props?.pageProps?.__APOLLO_STATE__;
-    if (!apollo || typeof apollo !== "object") return null;
+    if (!apollo || typeof apollo !== "object") return empty;
 
-    // Resolve posterId from the listing's posterInfo for an exact match.
+    // Resolve posterId from the listing's posterInfo for a deterministic match.
     let posterId: string | null = null;
     if (listingId) {
       const listingEntry = (apollo as Record<string, unknown>)[`StandardListing:${listingId}`] as Record<string, unknown> | undefined;
@@ -193,35 +204,49 @@ function parseSellerProfileUrl($: CheerioAPI, listingId: string | undefined): st
     }
 
     let profilePath: string | null = null;
+    let profileWebsiteUrl: string | null = null;
 
     if (posterId) {
       const apolloMap = apollo as Record<string, unknown>;
       const profileEntry =
         (apolloMap[`StandardProfileV2:${posterId}`] as Record<string, unknown> | undefined) ??
         (apolloMap[`CommercialProfileV2:${posterId}`] as Record<string, unknown> | undefined);
-      const pp = profileEntry?.["profilePath"];
-      if (typeof pp === "string") profilePath = pp;
+      if (profileEntry) {
+        const pp = profileEntry["profilePath"];
+        if (typeof pp === "string") profilePath = pp;
+        const wu = profileEntry["websiteUrl"];
+        if (typeof wu === "string" && wu) profileWebsiteUrl = wu;
+      }
     }
 
-    // Fallback: scan Apollo keys when posterId lookup misses.
-    if (!profilePath) {
+    // Fallback scan when posterId lookup misses (e.g. listingId not extracted from URL).
+    if (!profilePath || !profileWebsiteUrl) {
       for (const key of Object.keys(apollo as object)) {
         if (key.startsWith("StandardProfileV2:") || key.startsWith("CommercialProfileV2:")) {
-          const pp = ((apollo as Record<string, unknown>)[key] as Record<string, unknown> | undefined)?.["profilePath"];
-          if (typeof pp === "string") { profilePath = pp; break; }
+          const entry = (apollo as Record<string, unknown>)[key] as Record<string, unknown> | undefined;
+          if (!profilePath) {
+            const pp = entry?.["profilePath"];
+            if (typeof pp === "string") profilePath = pp;
+          }
+          if (!profileWebsiteUrl) {
+            const wu = entry?.["websiteUrl"];
+            if (typeof wu === "string" && wu) profileWebsiteUrl = wu;
+          }
+          if (profilePath && profileWebsiteUrl) break;
         }
       }
     }
 
-    if (profilePath) return `https://www.kijiji.ca${profilePath}`;
+    const profileUrl = profilePath ? `https://www.kijiji.ca${profilePath}` : null;
+    return { profileUrl, profileWebsiteUrl };
   } catch {
-    // fall through to Cheerio fallback
+    // fall through to Cheerio fallback for profile URL
   }
 
-  // Cheerio fallback: the profile anchor is inside [data-testid="vip-about-seller"]
-  // and starts with /o- for both FSBO (/o-profile/) and commercial (/o-<slug>/) profiles.
+  // Cheerio fallback for profile URL only — website URL requires the structured Apollo data.
   const fallbackHref = $('[data-testid="vip-about-seller"] a[href^="/o-"]').first().attr("href");
-  return fallbackHref ? `https://www.kijiji.ca${fallbackHref}` : null;
+  const profileUrl = fallbackHref ? `https://www.kijiji.ca${fallbackHref}` : null;
+  return { profileUrl, profileWebsiteUrl: null };
 }
 
 async function scrapeListingPage(url: string): Promise<RawListing | null> {
@@ -336,11 +361,15 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
   }
 
   // ─── Website ─────────────────────────────────────────────────────────────
-  const sidebarWebsiteHref = $("a[class*='websiteLink'], a[href*='website']")
-    .first()
-    .attr("href");
-  const sidebarWebsite = sidebarWebsiteHref?.startsWith("http")
-    ? sidebarWebsiteHref
+  // Kijiji's Website button is scoped inside [data-testid="vip-about-seller"] and renders
+  // as a plain anchor with rel="nofollow noopener noreferrer" and an absolute external href.
+  // The old class-name selector (a[class*='websiteLink']) failed because Kijiji's class
+  // names are minified hashes (e.g. sc-c8742e84-0); data-testid is stable by design.
+  const sidebarWebsiteHref = $(
+    '[data-testid="vip-about-seller"] a[href^="http"][rel*="nofollow"]'
+  ).first().attr("href");
+  const sidebarWebsite = sidebarWebsiteHref
+    ? unwrapKijijiRedirect(sidebarWebsiteHref)
     : undefined;
 
   const descriptionWebsites = extractWebsitesFromText(description);
@@ -368,10 +397,16 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
   const firstName = sellerName ? extractFirstName(sellerName) ?? undefined : undefined;
   const companyName = sellerName ? extractCompanyName(sellerName) ?? undefined : undefined;
 
-  // ─── Seller profile URL ───────────────────────────────────────────────────
-  const sellerProfileUrl = parseSellerProfileUrl($, listingId) ?? undefined;
+  // ─── Seller profile URL + profile website ─────────────────────────────────
+  const apolloSeller = parseApolloSellerInfo($, listingId);
+  const sellerProfileUrl = apolloSeller.profileUrl ?? undefined;
+  const profileWebsite = apolloSeller.profileWebsiteUrl ?? undefined;
+
   if (sellerProfileUrl) {
     logger.debug("Seller profile URL extracted", { sellerProfileUrl, url });
+  }
+  if (profileWebsite) {
+    logger.debug("Profile website URL extracted from Apollo state", { profileWebsite, url });
   }
 
   return {
@@ -382,6 +417,7 @@ async function scrapeListingPage(url: string): Promise<RawListing | null> {
     location,
     description,
     sidebarWebsite,
+    profileWebsite,
     descriptionWebsites,
     descriptionPhones,
     revealedPhone,
