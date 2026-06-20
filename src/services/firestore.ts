@@ -161,6 +161,13 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
     scrapedAt: admin.firestore.Timestamp.fromDate(lead.scrapedAt),
     expiresAt,
     source: "kijiji",
+    listingCity: lead.listingCity,
+    listingProvince: lead.listingProvince,
+    listingTimezone: lead.listingTimezone,
+    phoneAreaCodeTimezone: lead.phoneAreaCodeTimezone,
+    resolvedTimezone: lead.resolvedTimezone,
+    timezoneSource: lead.timezoneSource,
+    timezoneMismatch: lead.timezoneMismatch,
   };
 
   if (env.TEST_MODE) {
@@ -176,6 +183,21 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
   return docRef.id;
 }
 
+// Returns the deterministic Firestore doc ID for a website_detected opportunity.
+// The canonical hostname (www.-stripped, lower-cased) is stable across all listings
+// from the same business, making the document idempotent by website domain.
+export function websiteOpportunityDocId(websiteUrl: string): string {
+  try {
+    const hostname = new URL(websiteUrl).hostname.toLowerCase();
+    const canonical = hostname.startsWith("www.") ? hostname.slice(4) : hostname;
+    return `website_detected::${canonical}`;
+  } catch {
+    // Invalid URL — produce a safe fallback ID rather than throwing
+    const safe = websiteUrl.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100);
+    return `website_detected::${safe}`;
+  }
+}
+
 export async function createWebsiteDetectedOpportunity(
   listing: RawListing,
   websiteUrl: string,
@@ -183,34 +205,80 @@ export async function createWebsiteDetectedOpportunity(
 ): Promise<string> {
   const db = getDb();
   const now = admin.firestore.Timestamp.now();
-
-  const opportunity: FirestoreWebsiteOpportunity = {
-    listingUrl: listing.url,
-    listingId: listing.listingId ?? extractListingId(listing.url),
-    title: listing.title,
-    location: listing.location ?? null,
-    sellerName: listing.sellerName ?? null,
-    firstName: listing.firstName ?? null,
-    companyName: listing.companyName ?? null,
-    rawDescription: listing.description,
-    sellerProfileUrl: listing.sellerProfileUrl ?? null,
-    websiteUrl,
-    websiteFoundIn,
-    status: "website_detected",
-    createdAt: now,
-    scrapedAt: now,
-    source: "kijiji",
-  };
+  const listingId = listing.listingId ?? extractListingId(listing.url);
+  const docId = websiteOpportunityDocId(websiteUrl);
+  const docRef = db.collection("opportunities").doc(docId);
 
   if (env.TEST_MODE) {
     logger.info("[TEST] Website opportunity payload", {
-      ...opportunity,
-      createdAt: opportunity.createdAt.toDate().toISOString(),
-      scrapedAt: opportunity.scrapedAt.toDate().toISOString(),
+      docId,
+      listingUrl: listing.url,
+      listingId,
+      websiteUrl,
+      websiteFoundIn,
+      title: listing.title,
     });
   }
 
-  const docRef = await db.collection("opportunities").add(opportunity);
-  logger.info("Created website_detected opportunity", { id: docRef.id, websiteUrl, websiteFoundIn });
-  return docRef.id;
+  let isNew = false;
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    isNew = !snap.exists;
+
+    if (isNew) {
+      const opportunity: FirestoreWebsiteOpportunity = {
+        listingUrl: listing.url,
+        listingId,
+        listingUrls: [listing.url],
+        listingIds: listingId ? [listingId] : [],
+        title: listing.title,
+        location: listing.location ?? null,
+        sellerName: listing.sellerName ?? null,
+        firstName: listing.firstName ?? null,
+        companyName: listing.companyName ?? null,
+        rawDescription: listing.description,
+        sellerProfileUrl: listing.sellerProfileUrl ?? null,
+        sellerProfileUrls: listing.sellerProfileUrl ? [listing.sellerProfileUrl] : [],
+        websiteUrl,
+        websiteFoundIn,
+        status: "website_detected",
+        source: "kijiji",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        createdAt: now,
+        scrapedAt: now,
+        timesSeen: 1,
+      };
+      tx.set(docRef, opportunity);
+    } else {
+      // Resighting — update only sighting metadata.
+      // reviewStatus, tags, status, firstSeenAt, createdAt, and all other review fields
+      // on the existing document are untouched because we use update() not set().
+      const sightingUpdate: Record<string, unknown> = {
+        lastSeenAt: now,
+        scrapedAt: now,
+        timesSeen: admin.firestore.FieldValue.increment(1),
+        listingUrl: listing.url,
+        listingUrls: admin.firestore.FieldValue.arrayUnion(listing.url),
+      };
+      if (listingId) {
+        sightingUpdate.listingId = listingId;
+        sightingUpdate.listingIds = admin.firestore.FieldValue.arrayUnion(listingId);
+      }
+      if (listing.sellerProfileUrl) {
+        sightingUpdate.sellerProfileUrl = listing.sellerProfileUrl;
+        sightingUpdate.sellerProfileUrls = admin.firestore.FieldValue.arrayUnion(listing.sellerProfileUrl);
+      }
+      tx.update(docRef, sightingUpdate);
+    }
+  });
+
+  if (isNew) {
+    logger.info("Created website_detected opportunity", { id: docId, websiteUrl, websiteFoundIn });
+  } else {
+    logger.info("Updated website_detected opportunity (resighting)", { id: docId, websiteUrl });
+  }
+
+  return docId;
 }

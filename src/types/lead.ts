@@ -54,6 +54,14 @@ export interface QualifiedLead {
   rawDescription: string;
   sellerProfileUrl: string | null;
   scrapedAt: Date;
+  // Timezone metadata — used by mobile app for safe-contact-window logic
+  listingCity: string | null;
+  listingProvince: string | null;      // ISO code: "ON", "BC", etc.
+  listingTimezone: string | null;      // IANA: "America/Toronto", etc.
+  phoneAreaCodeTimezone: string | null;
+  resolvedTimezone: string | null;     // the timezone to use for contact-window decisions
+  timezoneSource: "listing_location" | "phone_area_code" | "unknown";
+  timezoneMismatch: boolean;           // true when listing and phone-area-code disagree
 }
 
 export interface FirestoreOpportunity {
@@ -75,11 +83,22 @@ export interface FirestoreOpportunity {
   scrapedAt: FirebaseFirestore.Timestamp;
   expiresAt: FirebaseFirestore.Timestamp;
   source: "kijiji";
+  // Timezone metadata — used by mobile app for safe-contact-window logic
+  listingCity: string | null;
+  listingProvince: string | null;      // ISO code: "ON", "BC", etc.
+  listingTimezone: string | null;      // IANA: "America/Toronto", etc.
+  phoneAreaCodeTimezone: string | null;
+  resolvedTimezone: string | null;     // the timezone to use for contact-window decisions
+  timezoneSource: "listing_location" | "phone_area_code" | "unknown";
+  timezoneMismatch: boolean;
 }
 
 // Preserved when a website is detected — not eligible for outreach queue.
+// Doc ID is deterministic: website_detected::<canonicalDomain> so the same business
+// always maps to the same document regardless of which listing triggered detection.
 // Query with where("status", "==", "website_detected") for relationship tracking.
 export interface FirestoreWebsiteOpportunity {
+  // Latest-sighting context (overwritten on each resighting)
   listingUrl: string;
   listingId: string | null;
   title: string;
@@ -89,12 +108,25 @@ export interface FirestoreWebsiteOpportunity {
   companyName: string | null;
   rawDescription: string;
   sellerProfileUrl: string | null;
+
+  // Accumulated across all sightings (arrayUnion on each resighting)
+  listingUrls: string[];
+  listingIds: string[];
+  sellerProfileUrls: string[];
+
+  // Website detection context (set once on creation)
   websiteUrl: string;
   websiteFoundIn: "sidebar" | "profile" | "description";
+
   status: "website_detected";
+  source: "kijiji";
+
+  // Timestamps — firstSeenAt/createdAt are set once; the rest update on each resighting
+  firstSeenAt: FirebaseFirestore.Timestamp;
+  lastSeenAt: FirebaseFirestore.Timestamp;
   createdAt: FirebaseFirestore.Timestamp;
   scrapedAt: FirebaseFirestore.Timestamp;
-  source: "kijiji";
+  timesSeen: number;
 }
 
 export interface ScrapedListing {

@@ -1,5 +1,67 @@
 import type { NormalizedPhone } from "../types/lead.js";
 
+// Maps Canadian NPA (area code) to IANA timezone.
+// Covers all active Canadian area codes as of 2025.
+// Saskatchewan uses America/Regina (Central, no DST).
+// Multi-province area codes (867 covers YT/NT/NU) use the dominant zone.
+const AREA_CODE_TIMEZONE: Record<string, string> = {
+  // British Columbia — America/Vancouver
+  "236": "America/Vancouver",
+  "250": "America/Vancouver",
+  "604": "America/Vancouver",
+  "672": "America/Vancouver",
+  "778": "America/Vancouver",
+  // Alberta — America/Edmonton
+  "403": "America/Edmonton",
+  "587": "America/Edmonton",
+  "780": "America/Edmonton",
+  "825": "America/Edmonton",
+  // Saskatchewan — America/Regina (Central, no DST)
+  "306": "America/Regina",
+  "474": "America/Regina",
+  "639": "America/Regina",
+  // Manitoba — America/Winnipeg
+  "204": "America/Winnipeg",
+  "431": "America/Winnipeg",
+  // Ontario — America/Toronto
+  "226": "America/Toronto",
+  "249": "America/Toronto",
+  "289": "America/Toronto",
+  "343": "America/Toronto",
+  "365": "America/Toronto",
+  "382": "America/Toronto",
+  "416": "America/Toronto",
+  "437": "America/Toronto",
+  "519": "America/Toronto",
+  "548": "America/Toronto",
+  "613": "America/Toronto",
+  "647": "America/Toronto",
+  "683": "America/Toronto",
+  "705": "America/Toronto",
+  "753": "America/Toronto",
+  "807": "America/Toronto",
+  "905": "America/Toronto",
+  // Quebec — America/Toronto (Eastern, same rules as Ontario)
+  "367": "America/Toronto",
+  "418": "America/Toronto",
+  "428": "America/Toronto",
+  "438": "America/Toronto",
+  "450": "America/Toronto",
+  "514": "America/Toronto",
+  "579": "America/Toronto",
+  "581": "America/Toronto",
+  "819": "America/Toronto",
+  "873": "America/Toronto",
+  // Atlantic provinces (NB, NS, PEI) — America/Halifax
+  "506": "America/Halifax",
+  "782": "America/Halifax",
+  "902": "America/Halifax",
+  // Newfoundland and Labrador — America/St_Johns (UTC-3:30)
+  "709": "America/St_Johns",
+  // Northern territories (YT/NT/NU shared 867) — America/Yellowknife as default
+  "867": "America/Yellowknife",
+};
+
 export interface PhoneSelectionResult {
   primary: NormalizedPhone | null;
   all: NormalizedPhone[];
@@ -33,6 +95,14 @@ export function normalizePhone(
   const e164 = toE164(raw);
   if (!e164) return null;
   return { e164, raw, source };
+}
+
+// Returns the IANA timezone for the area code embedded in a Canadian E.164 number (+1NPA…).
+// Returns null for unrecognized or non-Canadian numbers.
+export function areaCodeToTimezone(e164: string): string | null {
+  if (!e164.startsWith("+1") || e164.length < 5) return null;
+  const npa = e164.slice(2, 5);
+  return AREA_CODE_TIMEZONE[npa] ?? null;
 }
 
 export function selectPhone(

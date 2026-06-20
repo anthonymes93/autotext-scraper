@@ -1,5 +1,6 @@
 import { detectWebsite } from "../parsers/website.js";
-import { selectPhone } from "../parsers/phone.js";
+import { selectPhone, areaCodeToTimezone } from "../parsers/phone.js";
+import { parseLocation, locationToTimezone } from "../parsers/location.js";
 import { extractFirstName, extractCompanyName, isAmbiguousSellerName } from "../parsers/names.js";
 import { phoneExistsInContacts } from "./firestore.js";
 import { phoneExistsInNotion } from "./notion.js";
@@ -170,6 +171,46 @@ export async function processListing(listing: RawListing): Promise<PipelineResul
     messageLength: outreachMessage.length,
   });
 
+  // Step 7.5: Timezone resolution
+  // Listing location is the primary source — it reflects where the contractor works.
+  // Phone area code is secondary — useful when location is unparseable.
+  // If both are available and disagree, keep listing as authoritative and flag the mismatch.
+  const parsedLocation = listing.location ? parseLocation(listing.location) : null;
+  const listingTimezone = parsedLocation?.province
+    ? locationToTimezone(listing.location!)
+    : null;
+  const phoneAreaCodeTimezone = areaCodeToTimezone(phone.e164);
+
+  let resolvedTimezone: string | null;
+  let timezoneSource: QualifiedLead["timezoneSource"];
+  let timezoneMismatch = false;
+
+  if (listingTimezone) {
+    resolvedTimezone = listingTimezone;
+    timezoneSource = "listing_location";
+    if (phoneAreaCodeTimezone && phoneAreaCodeTimezone !== listingTimezone) {
+      timezoneMismatch = true;
+    }
+  } else if (phoneAreaCodeTimezone) {
+    resolvedTimezone = phoneAreaCodeTimezone;
+    timezoneSource = "phone_area_code";
+  } else {
+    resolvedTimezone = null;
+    timezoneSource = "unknown";
+  }
+
+  logger.debug("Step 7.5 timezone resolution", {
+    url,
+    listingLocation: listing.location ?? null,
+    listingCity: parsedLocation?.city ?? null,
+    listingProvince: parsedLocation?.province ?? null,
+    listingTimezone,
+    phoneAreaCodeTimezone,
+    resolvedTimezone,
+    timezoneSource,
+    timezoneMismatch,
+  });
+
   // Step 8: Assemble qualified lead
   const lead: QualifiedLead = {
     listingUrl: url,
@@ -185,6 +226,13 @@ export async function processListing(listing: RawListing): Promise<PipelineResul
     rawDescription: listing.description,
     sellerProfileUrl: listing.sellerProfileUrl ?? null,
     scrapedAt: new Date(),
+    listingCity: parsedLocation?.city ?? null,
+    listingProvince: parsedLocation?.province ?? null,
+    listingTimezone,
+    phoneAreaCodeTimezone,
+    resolvedTimezone,
+    timezoneSource,
+    timezoneMismatch,
   };
 
   logger.info("Lead qualified", {
