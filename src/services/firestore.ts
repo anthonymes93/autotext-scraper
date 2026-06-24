@@ -98,6 +98,83 @@ export async function phoneExistsInContacts(phone: string): Promise<boolean> {
   return !snap.empty;
 }
 
+// Skip reasons written by the mobile app that signal a timing problem, not a
+// quality rejection. A contractor whose ad expired or was manually removed is
+// still a valid prospect — allow a new listing from the same phone to resurface.
+const REENTRY_SAFE_SKIP_REASONS = new Set([
+  "ad_no_longer_available",
+]);
+
+export interface PhoneBlockDecision {
+  block: boolean;
+  // new_phone          — phone has never been seen; pass through
+  // resurfaced_allowed — phone was seen but skip reason permits re-entry
+  // same_listing       — exact same listingId was already processed
+  // duplicate_firestore — conservative block (contacted, bad number, etc.)
+  reason: "new_phone" | "same_listing" | "resurfaced_allowed" | "duplicate_firestore";
+  previousSkipReason?: string;
+  previousListingId?: string | null;
+  previousStatus?: string;
+}
+
+// Replaces the unconditional phoneExistsInContacts block with reason-aware logic.
+// Allows a new listing from the same phone to enter the queue when the prior skip
+// was a timing issue (ad gone, future opportunity) rather than a quality rejection.
+export async function shouldBlockPhoneForNewListing(
+  phone: string,
+  incomingListingId: string,
+): Promise<PhoneBlockDecision> {
+  const db = getDb();
+
+  // 1. Phone never seen — pass through immediately.
+  const contactSnap = await db
+    .collection("contacts")
+    .where("phone", "==", phone)
+    .limit(1)
+    .get();
+  if (contactSnap.empty) {
+    return { block: false, reason: "new_phone" };
+  }
+
+  // 2. Find the most recent opportunity for this phone to read its skip reason.
+  //    Fetching all and sorting client-side avoids a composite Firestore index.
+  const oppSnap = await db
+    .collection("opportunities")
+    .where("phoneNumber", "==", phone)
+    .get();
+
+  if (oppSnap.empty) {
+    // Contact exists but no matching opportunity — block conservatively.
+    logger.debug("Phone in contacts but no opportunity found; blocking conservatively", { phone });
+    return { block: true, reason: "duplicate_firestore" };
+  }
+
+  const mostRecent = oppSnap.docs
+    .map((d) => d.data())
+    .sort((a, b) => {
+      const aMs = (a.createdAt as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0;
+      const bMs = (b.createdAt as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0;
+      return bMs - aMs;
+    })[0];
+
+  const previousListingId = (mostRecent.listingId as string | null | undefined) ?? null;
+  const previousSkipReason = (mostRecent.skipReason as string | undefined) ?? undefined;
+  const previousStatus = (mostRecent.status as string | undefined) ?? undefined;
+
+  // 3. Same listing — block regardless of skip reason.
+  if (incomingListingId && previousListingId && incomingListingId === previousListingId) {
+    return { block: true, reason: "same_listing", previousSkipReason, previousListingId, previousStatus };
+  }
+
+  // 4. Re-entry-safe skip reason on a different listing — allow resurfacing.
+  if (previousSkipReason && REENTRY_SAFE_SKIP_REASONS.has(previousSkipReason)) {
+    return { block: false, reason: "resurfaced_allowed", previousSkipReason, previousListingId, previousStatus };
+  }
+
+  // 5. Conservative default — block.
+  return { block: true, reason: "duplicate_firestore", previousSkipReason, previousListingId, previousStatus };
+}
+
 export async function upsertContact(lead: QualifiedLead): Promise<void> {
   const db = getDb();
   const now = admin.firestore.Timestamp.now();

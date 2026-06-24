@@ -2,7 +2,7 @@ import { detectWebsite } from "../parsers/website.js";
 import { selectPhone, areaCodeToTimezone } from "../parsers/phone.js";
 import { parseLocation, locationToTimezone } from "../parsers/location.js";
 import { extractFirstName, extractCompanyName, isAmbiguousSellerName } from "../parsers/names.js";
-import { phoneExistsInContacts } from "./firestore.js";
+import { shouldBlockPhoneForNewListing, extractListingId } from "./firestore.js";
 import { phoneExistsInNotion } from "./notion.js";
 import { validateLead } from "./openai.js";
 import { logger } from "../utils/logger.js";
@@ -79,20 +79,48 @@ export async function processListing(listing: RawListing): Promise<PipelineResul
     totalFound: phoneResult.count,
   });
 
-  // Step 3: Firestore duplicate check (skipped in test mode — no credentials / no pollution)
+  // Step 3: Firestore phone-level dedupe — reason-aware to allow resurfacing.
+  // A phone seen before is only blocked permanently when the prior skip reflects a
+  // quality rejection (bad number, already contacted, etc.). Timing-based skips
+  // (ad_no_longer_available, future_opportunity) set isResurfaced=true and let the
+  // new listing through, provided it carries a different listingId.
+  let isResurfaced = false;
   if (!env.TEST_MODE) {
-    const firestoreDupe = await phoneExistsInContacts(phone.e164);
-    if (firestoreDupe) {
-      logger.info("Skipped: duplicate in Firestore contacts", { url, phone: phone.e164 });
+    const incomingListingId = listing.listingId ?? extractListingId(url) ?? "";
+    const decision = await shouldBlockPhoneForNewListing(phone.e164, incomingListingId);
+
+    if (decision.block) {
+      logger.info("Skipped: phone blocked by Firestore dedupe", {
+        url,
+        phone: phone.e164,
+        reason: decision.reason,
+        previousListingId: decision.previousListingId,
+        previousSkipReason: decision.previousSkipReason,
+        previousStatus: decision.previousStatus,
+      });
       return { url, status: "skipped", skipReason: "duplicate_firestore", phone: phone.e164 };
     }
-    logger.debug("Step 3 passed: no Firestore duplicate", { phone: phone.e164 });
+
+    if (decision.reason === "resurfaced_allowed") {
+      isResurfaced = true;
+      logger.info("Phone previously skipped with re-entry-safe reason; allowing new listing", {
+        url,
+        phone: phone.e164,
+        newListingId: incomingListingId || null,
+        previousListingId: decision.previousListingId,
+        previousSkipReason: decision.previousSkipReason,
+      });
+    } else {
+      logger.debug("Step 3 passed: no Firestore duplicate", { phone: phone.e164 });
+    }
   } else {
     logger.debug("Step 3 skipped: test mode, no Firestore dedup", { phone: phone.e164 });
   }
 
-  // Step 4: Notion duplicate check (skipped in test mode or when Notion is disabled)
-  if (!env.TEST_MODE && env.NOTION_ENABLED) {
+  // Step 4: Notion duplicate check — bypassed when Firestore confirmed re-entry is safe.
+  // Notion holds a permanent phone-level record; bypassing it here prevents Notion from
+  // silently undoing the resurfacing decision made in Step 3.
+  if (!env.TEST_MODE && env.NOTION_ENABLED && !isResurfaced) {
     const notionDupe = await phoneExistsInNotion(phone.e164);
     if (notionDupe) {
       logger.info("Skipped: duplicate in Notion", { url, phone: phone.e164 });
@@ -100,7 +128,11 @@ export async function processListing(listing: RawListing): Promise<PipelineResul
     }
     logger.debug("Step 4 passed: no Notion duplicate", { phone: phone.e164 });
   } else {
-    const reason = env.TEST_MODE ? "test mode" : "Notion disabled";
+    const reason = env.TEST_MODE
+      ? "test mode"
+      : isResurfaced
+        ? "resurfaced re-entry — Notion check bypassed"
+        : "Notion disabled";
     logger.debug(`Step 4 skipped: ${reason}`, { phone: phone.e164 });
   }
 
