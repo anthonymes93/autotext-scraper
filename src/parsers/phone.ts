@@ -6,12 +6,14 @@ import type { NormalizedPhone } from "../types/lead.js";
 // Multi-province area codes (867 covers YT/NT/NU) use the dominant zone.
 const AREA_CODE_TIMEZONE: Record<string, string> = {
   // British Columbia — America/Vancouver
+  "257": "America/Vancouver",
   "236": "America/Vancouver",
   "250": "America/Vancouver",
   "604": "America/Vancouver",
   "672": "America/Vancouver",
   "778": "America/Vancouver",
   // Alberta — America/Edmonton
+  "368": "America/Edmonton",
   "403": "America/Edmonton",
   "587": "America/Edmonton",
   "780": "America/Edmonton",
@@ -21,6 +23,7 @@ const AREA_CODE_TIMEZONE: Record<string, string> = {
   "474": "America/Regina",
   "639": "America/Regina",
   // Manitoba — America/Winnipeg
+  "584": "America/Winnipeg",
   "204": "America/Winnipeg",
   "431": "America/Winnipeg",
   // Ontario — America/Toronto
@@ -40,11 +43,15 @@ const AREA_CODE_TIMEZONE: Record<string, string> = {
   "705": "America/Toronto",
   "753": "America/Toronto",
   "807": "America/Toronto",
+  "742": "America/Toronto",
   "905": "America/Toronto",
   // Quebec — America/Toronto (Eastern, same rules as Ontario)
+  "263": "America/Toronto",
+  "354": "America/Toronto",
+  "468": "America/Toronto",
   "367": "America/Toronto",
   "418": "America/Toronto",
-  "428": "America/Toronto",
+
   "438": "America/Toronto",
   "450": "America/Toronto",
   "514": "America/Toronto",
@@ -53,10 +60,12 @@ const AREA_CODE_TIMEZONE: Record<string, string> = {
   "819": "America/Toronto",
   "873": "America/Toronto",
   // Atlantic provinces (NB, NS, PEI) — America/Halifax
+  "428": "America/Moncton",
   "506": "America/Halifax",
   "782": "America/Halifax",
   "902": "America/Halifax",
   // Newfoundland and Labrador — America/St_Johns (UTC-3:30)
+  "879": "America/St_Johns",
   "709": "America/St_Johns",
   // Northern territories (YT/NT/NU shared 867) — America/Yellowknife as default
   "867": "America/Yellowknife",
