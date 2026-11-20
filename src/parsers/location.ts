@@ -79,7 +79,60 @@ export function parseLocation(raw: string): ParsedLocation {
 }
 
 // Returns the IANA timezone for a raw location string, or null when province is unresolvable.
+const CITY_ZONES: Record<string, Record<string, string>> = {
+  "BC": {
+    "vancouver": "America/Vancouver",
+    "victoria": "America/Vancouver",
+    "surrey": "America/Vancouver",
+    "burnaby": "America/Vancouver",
+    "kelowna": "America/Vancouver",
+    "kamloops": "America/Vancouver",
+    "prince george": "America/Vancouver",
+    "dawson creek": "America/Dawson_Creek",
+    "fort st. john": "America/Dawson_Creek",
+    "fort st john": "America/Dawson_Creek",
+    "cranbrook": "America/Edmonton",
+    "golden": "America/Edmonton",
+    "fernie": "America/Edmonton",
+    "creston": "America/Creston"
+  },
+  "ON": {
+    "kenora": "America/Winnipeg",
+    "dryden": "America/Winnipeg",
+    "fort frances": "America/Winnipeg",
+    "toronto": "America/Toronto",
+    "hamilton": "America/Toronto",
+    "ottawa": "America/Toronto",
+    "thunder bay": "America/Toronto"
+  },
+  "SK": {
+    "lloydminster": "America/Edmonton",
+    "regina": "America/Regina",
+    "saskatoon": "America/Regina"
+  },
+  "NL": {
+    "st. john's": "America/St_Johns",
+    "st john's": "America/St_Johns",
+    "corner brook": "America/St_Johns",
+    "happy valley-goose bay": "America/Goose_Bay",
+    "labrador city": "America/Goose_Bay"
+  },
+  "QC": {
+    "blanc-sablon": "America/Blanc-Sablon",
+    "montreal": "America/Toronto",
+    "montréal": "America/Toronto",
+    "quebec city": "America/Toronto"
+  },
+  "NU": {
+    "iqaluit": "America/Iqaluit",
+    "rankin inlet": "America/Rankin_Inlet",
+    "cambridge bay": "America/Cambridge_Bay"
+  }
+}
+
 export function locationToTimezone(raw: string): string | null {
-  const { province } = parseLocation(raw);
+  const { province, city } = parseLocation(raw);
+  const exact = province && city ? CITY_ZONES[province]?.[city.toLowerCase()] : null;
+  if (exact) return exact;
   return province ? (PROVINCE_TIMEZONE[province] ?? null) : null;
 }
