@@ -2,7 +2,7 @@ import "./config/env.js";
 import cron from "node-cron";
 import { runScraper, ScraperBlockedError } from "./scraper/kijiji.js";
 import { processListing } from "./services/leadDecision.js";
-import { createOpportunity, createWebsiteDetectedOpportunity, upsertContact, updateListingStatus } from "./services/firestore.js";
+import { createOpportunity, createWebsiteDetectedOpportunity, upsertContact, updateListingStatus, shouldBlockPhoneForNewListing, extractListingId } from "./services/firestore.js";
 import { addLeadToNotion, phoneExistsInNotion } from "./services/notion.js";
 import { detectWebsite } from "./parsers/website.js";
 import { logger } from "./utils/logger.js";
@@ -185,15 +185,24 @@ async function runPipeline(): Promise<void> {
 
       // Defensive guard: re-check Notion immediately before writing, in case the
       // pipeline check was skipped due to a transient error or config change.
-      if (env.NOTION_ENABLED && !env.TEST_MODE) {
+      if (!env.TEST_MODE) {
+        const decision = await shouldBlockPhoneForNewListing(result.phone, listing.listingId ?? extractListingId(result.url) ?? "");
+        if (decision.block) {
+          stats.created--;
+          stats.skipped++;
+          continue;
+        }
+        if (env.NOTION_ENABLED && decision.reason !== "resurfaced_allowed") {
         const notionDupe = await phoneExistsInNotion(result.phone);
         if (notionDupe) {
           logger.warn("Blocked opportunity creation: duplicate_notion", {
             phone: result.phone,
             listingUrl: result.url,
           });
+          stats.created--;
           stats.skipped++;
           continue;
+        }
         }
       }
 

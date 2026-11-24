@@ -126,53 +126,29 @@ export async function shouldBlockPhoneForNewListing(
 ): Promise<PhoneBlockDecision> {
   const db = getDb();
 
-  // 1. Phone never seen — pass through immediately.
-  const contactSnap = await db
-    .collection("contacts")
-    .where("phone", "==", phone)
-    .limit(1)
-    .get();
-  if (contactSnap.empty) {
-    return { block: false, reason: "new_phone" };
-  }
-
-  // 2. Find the most recent opportunity for this phone to read its skip reason.
-  //    Fetching all and sorting client-side avoids a composite Firestore index.
-  const oppSnap = await db
-    .collection("opportunities")
-    .where("phoneNumber", "==", phone)
-    .get();
-
-  if (oppSnap.empty) {
-    // Contact exists but no matching opportunity — block conservatively.
-    logger.debug("Phone in contacts but no opportunity found; blocking conservatively", { phone });
+  // Read both legacy scraper contacts and the CRM's canonical phone document.
+  const [canonical, legacy, oppSnap] = await Promise.all([
+    db.collection("contacts").doc(phone).get(),
+    db.collection("contacts").where("phone", "==", phone).get(),
+    db.collection("opportunities").where("phoneNumber", "==", phone).get(),
+  ]);
+  const contacts = [canonical, ...legacy.docs].filter(d => d.exists).map(d => d.data()!);
+  const history = oppSnap.docs.map(d => d.data());
+  if (contacts.some(c => c.timesCalled > 0 || c.timesTexted > 0 || c.lastCalledAt || c.lastTextedAt || c.doNotContact === true || c.existsInNotion === true)) {
     return { block: true, reason: "duplicate_firestore" };
   }
-
-  const mostRecent = oppSnap.docs
-    .map((d) => d.data())
-    .sort((a, b) => {
-      const aMs = (a.createdAt as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0;
-      const bMs = (b.createdAt as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0;
-      return bMs - aMs;
-    })[0];
-
-  const previousListingId = (mostRecent.listingId as string | null | undefined) ?? null;
-  const previousSkipReason = (mostRecent.skipReason as string | undefined) ?? undefined;
-  const previousStatus = (mostRecent.status as string | undefined) ?? undefined;
-
-  // 3. Same listing — block regardless of skip reason.
-  if (incomingListingId && previousListingId && incomingListingId === previousListingId) {
-    return { block: true, reason: "same_listing", previousSkipReason, previousListingId, previousStatus };
+  if (history.some(o => incomingListingId && o.listingId === incomingListingId)) {
+    return { block: true, reason: "same_listing" };
   }
-
-  // 4. Re-entry-safe skip reason on a different listing — allow resurfacing.
-  if (previousSkipReason && REENTRY_SAFE_SKIP_REASONS.has(previousSkipReason)) {
-    return { block: false, reason: "resurfaced_allowed", previousSkipReason, previousListingId, previousStatus };
+  if (history.some(o => o.contactedAt || o.lastContactedAt || o.lastCallOutcome || o.status === "contacted" || o.status === "texted" || o.status === "ready" || o.status === "archived" || o.followUpAt || o.appointmentAt)) {
+    return { block: true, reason: "duplicate_firestore" };
   }
-
-  // 5. Conservative default — block.
-  return { block: true, reason: "duplicate_firestore", previousSkipReason, previousListingId, previousStatus };
+  if (!history.length) return contacts.length ? { block: true, reason: "duplicate_firestore" } : { block: false, reason: "new_phone" };
+  const eligible = history.every(o => o.source === "kijiji" && (o.status === "expired" || (o.status === "skipped" && REENTRY_SAFE_SKIP_REASONS.has(o.skipReason))));
+  if (eligible && incomingListingId && history.every(o => o.listingId && o.listingId !== incomingListingId)) {
+    return { block: false, reason: "resurfaced_allowed" };
+  }
+  return { block: true, reason: "duplicate_firestore" };
 }
 
 export async function upsertContact(lead: QualifiedLead): Promise<void> {
