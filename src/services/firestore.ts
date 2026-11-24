@@ -187,7 +187,7 @@ export async function upsertContact(lead: QualifiedLead): Promise<void> {
   logger.debug("Created new contact", { phone });
 }
 
-export async function createOpportunity(lead: QualifiedLead): Promise<string> {
+export async function createOpportunity(lead: QualifiedLead): Promise<string | null> {
   const db = getDb();
   const now = admin.firestore.Timestamp.now();
 
@@ -231,9 +231,34 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string> {
     });
   }
 
-  const docRef = await db.collection("opportunities").add(opportunity);
-  logger.info("Created opportunity", { id: docRef.id, phoneNumber: lead.phone.e164 });
-  return docRef.id;
+  const phone = lead.phone.e164;
+  const contactRef = db.collection("contacts").doc(phone);
+  const docRef = db.collection("opportunities").doc();
+  return db.runTransaction(async tx => {
+    const contact = await tx.get(contactRef);
+    const existing = contact.data();
+    if (existing?.timesCalled > 0 || existing?.timesTexted > 0 || existing?.lastCalledAt || existing?.lastTextedAt || existing?.doNotContact === true || existing?.existsInNotion === true) return null;
+    if (existing?.activeOpportunityId) {
+      const active = await tx.get(db.collection("opportunities").doc(existing.activeOpportunityId));
+      if (active.exists && active.data()?.status === "ready") return null;
+    }
+    const history = await tx.get(db.collection("opportunities").where("phoneNumber", "==", phone));
+    if (history.docs.some(d => {
+      const o = d.data();
+      return o.status === "ready" || o.status === "contacted" || o.status === "texted" || o.contactedAt || o.lastContactedAt || (opportunity.listingId && o.listingId === opportunity.listingId);
+    })) return null;
+    tx.set(docRef, { ...opportunity, contactIdentityKey: phone.slice(2) });
+    tx.set(contactRef, {
+      phoneNumber: phone,
+      phone,
+      firstSeenAt: existing?.firstSeenAt ?? now,
+      lastSeenAt: now,
+      timesSeen: admin.firestore.FieldValue.increment(1),
+      activeOpportunityId: docRef.id,
+      listingUrls: admin.firestore.FieldValue.arrayUnion(lead.listingUrl),
+    }, { merge: true });
+    return docRef.id;
+  });
 }
 
 // Returns the deterministic Firestore doc ID for a website_detected opportunity.

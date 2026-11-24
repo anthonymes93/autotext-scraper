@@ -212,10 +212,14 @@ async function runPipeline(): Promise<void> {
           phone: result.phone,
         });
       } else {
-        const writes: Promise<unknown>[] = [
-          createOpportunity(result.lead),
-          upsertContact(result.lead),
-        ];
+        const createdId = await createOpportunity(result.lead);
+        if (!createdId) {
+          stats.created--;
+          stats.skipped++;
+          logger.info("Concurrent or existing lead blocked", { phone: result.phone });
+          continue;
+        }
+        const writes: Promise<unknown>[] = [upsertContact(result.lead)];
 
         if (env.NOTION_ENABLED && env.NOTION_WRITE_ENABLED) {
           writes.push(addLeadToNotion(result.lead));
