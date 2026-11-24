@@ -126,6 +126,9 @@ export async function shouldBlockPhoneForNewListing(
 ): Promise<PhoneBlockDecision> {
   const db = getDb();
 
+  const relationships = await Promise.all([db.collection("crmPersons").get(), db.collection("crmCompanies").get()]);
+  if (relationships.some(snapshot => snapshot.docs.some(d => relationshipPhoneMatches(d.data(), phone)))) return { block: true, reason: "duplicate_firestore" };
+
   // Read both legacy scraper contacts and the CRM's canonical phone document.
   const [canonical, legacy, oppSnap] = await Promise.all([
     db.collection("contacts").doc(phone).get(),
@@ -236,6 +239,9 @@ export async function createOpportunity(lead: QualifiedLead): Promise<string | n
   const docRef = db.collection("opportunities").doc();
   return db.runTransaction(async tx => {
     const contact = await tx.get(contactRef);
+    const people = await tx.get(db.collection("crmPersons"));
+    const companies = await tx.get(db.collection("crmCompanies"));
+    if ([...people.docs, ...companies.docs].some(d => relationshipPhoneMatches(d.data(), phone))) return null;
     const existing = contact.data();
     if (existing?.timesCalled > 0 || existing?.timesTexted > 0 || existing?.lastCalledAt || existing?.lastTextedAt || existing?.doNotContact === true || existing?.existsInNotion === true) return null;
     if (existing?.activeOpportunityId) {
@@ -359,4 +365,9 @@ export async function createWebsiteDetectedOpportunity(
   }
 
   return docId;
+}
+
+function relationshipPhoneMatches(data: Record<string, unknown>, phone: string): boolean {
+  const key = (value: string) => value.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  return [data.phone, data.normalizedPhone].some(value => typeof value === "string" && key(value) === key(phone));
 }
